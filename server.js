@@ -134,6 +134,9 @@ app.get('/api/debug/shufersal', async (req, res) => {
           ok: true,
           compressedKB: Math.round(dlRes.data.byteLength / 1024),
           xmlKB: Math.round(xml.length / 1024),
+          rawXmlSample: xml.substring(0, 800),
+          docKeys: Object.keys(doc),
+          rootKeys: root ? Object.keys(root) : [],
           productCount: arr.length,
           firstProduct: sample,
         }
