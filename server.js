@@ -156,6 +156,27 @@ app.get('/api/debug/shufersal', async (req, res) => {
   }
 })
 
+// ── Diagnostic: test Cerberus chains ─────────────────────────
+app.get('/api/debug/cerberus', async (req, res) => {
+  const https = await import('https')
+  const axios = (await import('axios')).default
+  const agent = new https.default.Agent({ rejectUnauthorized: false })
+  const chains = ['RamiLevi', 'Yohananof', 'osherad']
+  const results = {}
+  for (const chain of chains) {
+    const url = `https://url.publishedprices.co.il/file/d/${chain}/`
+    try {
+      const r = await axios.get(url, { httpsAgent: agent, timeout: 10000,
+        headers: { 'User-Agent': 'Mozilla/5.0' } })
+      const gzCount = (r.data.match(/\.gz/g) || []).length
+      results[chain] = { ok: true, status: r.status, gzFiles: gzCount, htmlKB: Math.round(r.data.length / 1024) }
+    } catch (err) {
+      results[chain] = { ok: false, error: err.message.substring(0, 120) }
+    }
+  }
+  res.json(results)
+})
+
 // ── Start server ──────────────────────────────────────────────
 const PORT = process.env.PORT || 3001
 app.listen(PORT, async () => {
