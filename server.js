@@ -164,12 +164,24 @@ app.get('/api/debug/cerberus', async (req, res) => {
   const chains = ['RamiLevi', 'Yohananof', 'osherad']
   const results = {}
   for (const chain of chains) {
-    const url = `https://url.publishedprices.co.il/file/d/${chain}/`
     try {
-      const r = await axios.get(url, { httpsAgent: agent, timeout: 10000,
-        headers: { 'User-Agent': 'Mozilla/5.0' } })
-      const gzCount = (r.data.match(/\.gz/g) || []).length
-      results[chain] = { ok: true, status: r.status, gzFiles: gzCount, htmlKB: Math.round(r.data.length / 1024) }
+      // Step 1: login
+      const loginRes = await axios.post(
+        `https://url.publishedprices.co.il/login/user`,
+        new URLSearchParams({ username: chain, password: '' }).toString(),
+        { httpsAgent: agent, timeout: 10000, maxRedirects: 5,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+          validateStatus: (s) => s < 500 }
+      )
+      const cookie = (loginRes.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ')
+
+      // Step 2: get file list
+      const listRes = await axios.get(`https://url.publishedprices.co.il/file/d/${chain}/`,
+        { httpsAgent: agent, timeout: 10000, headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' } })
+      const gzCount = (listRes.data.match(/\.gz/g) || []).length
+
+      results[chain] = { ok: true, loginStatus: loginRes.status, hasCookie: !!cookie,
+        gzFiles: gzCount, listStatus: listRes.status, htmlKB: Math.round(listRes.data.length / 1024) }
     } catch (err) {
       results[chain] = { ok: false, error: err.message.substring(0, 120) }
     }
