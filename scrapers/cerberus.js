@@ -1,12 +1,11 @@
 /**
- * Cerberus scraper — url.retail.publishedprices.co.il
- * Covers: רמי לוי, יוחננוף, אושר עד, and others
+ * Cerberus scraper — url.publishedprices.co.il
+ * Covers: רמי לוי, יוחננוף, אושר עד, חצי חינם, טיב טעם
  *
- * The Cerberus system requires login. To use this scraper:
- *   1. Register at https://url.retail.publishedprices.co.il/login
- *   2. Set env vars: CERBERUS_USER and CERBERUS_PASS
+ * No login/registration needed — files are publicly accessible at:
+ * https://url.publishedprices.co.il/file/d/{ChainName}/
  *
- * Without credentials → returns empty (gracefully skipped)
+ * SSL cert on this server is self-signed → rejectUnauthorized: false
  */
 
 import axios from 'axios'
@@ -17,135 +16,120 @@ import { XMLParser } from 'fast-xml-parser'
 
 const gunzip = promisify(zlib.gunzip)
 
-const BASE = 'https://url.retail.publishedprices.co.il'
+const BASE = 'https://url.publishedprices.co.il'
 
-// SSL agent that ignores self-signed cert (the site has cert issues)
+// SSL agent that ignores self-signed cert
 const httpsAgent = new https.Agent({ rejectUnauthorized: false })
 
-// Chain IDs on Cerberus → our brand key
-const CHAIN_MAP = {
-  '7290058140886': 'ramilevi',  // רמי לוי
-  '7290055700007': 'yohananof', // יוחננוף
-  '7290696200003': 'osher',     // אושר עד
-  '7290876100000': 'osher',     // אושר עד (alt)
+// Chain name → our brand key
+const CHAINS = {
+  RamiLevi:  'ramilevi',
+  Yohananof: 'yohananof',
+  osherad:   'osher',
+  HaziHinam: 'osher',   // similar brand, merge under osher
+  TivTaam:   'tivtaam',
 }
 
-async function login(user, pass) {
-  const res = await axios.post(
-    `${BASE}/login`,
-    new URLSearchParams({ username: user, password: pass }).toString(),
-    {
-      httpsAgent,
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      maxRedirects: 0,
-      validateStatus: (s) => s < 400,
-      timeout: 15000,
-    }
-  )
-  // Grab session cookie
-  const setCookie = res.headers['set-cookie'] || []
-  const cookie = setCookie.map((c) => c.split(';')[0]).join('; ')
-  if (!cookie) throw new Error('Login failed — no cookie returned')
-  return cookie
-}
-
-async function getFileList(cookie) {
-  const res = await axios.get(`${BASE}/file/d/`, {
+/** Fetch file listing for a chain → array of filenames */
+async function getFileList(chainName) {
+  const url = `${BASE}/file/d/${chainName}/`
+  const res = await axios.get(url, {
     httpsAgent,
-    headers: { Cookie: cookie },
     timeout: 20000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
   })
   const html = res.data
 
-  // Parse links: href="/file/d/Price...gz" or similar
+  // Match Price/PriceFull gz file links
   const re = /href="([^"]*(?:PriceFull|Price)[^"]*\.gz[^"]*)"/gi
   const files = []
   let m
   while ((m = re.exec(html)) !== null) {
-    const url = m[1].startsWith('http') ? m[1] : `${BASE}${m[1]}`
-    files.push(url)
+    const name = m[1].replace(/&amp;/g, '&')
+    files.push(name.startsWith('http') ? name : `${BASE}/file/d/${chainName}/${name}`)
   }
   return files
 }
 
-async function parseGzFile(url, cookie, label) {
+/** Download + decompress + parse one .gz → { barcode: price } */
+async function parseGzFile(url) {
   const res = await axios.get(url, {
     httpsAgent,
-    headers: { Cookie: cookie },
     responseType: 'arraybuffer',
-    timeout: 90000,
+    timeout: 120000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
+    maxContentLength: 50 * 1024 * 1024,
   })
 
   const xml = (await gunzip(Buffer.from(res.data))).toString('utf8')
-  const parser = new XMLParser({ ignoreAttributes: false, parseTagValue: true, trimValues: true })
+  const parser = new XMLParser({ parseTagValue: true, trimValues: true })
   const doc = parser.parse(xml)
 
-  const root = doc?.root || doc?.Prices || doc
-  const chainId = String(root?.ChainId || '')
-  const brand = CHAIN_MAP[chainId] || 'unknown'
-
-  const products = root?.Products?.Product || root?.Items?.Item || []
-  const arr = Array.isArray(products) ? products : [products]
+  const root = doc?.Root || doc?.root || doc?.Prices || doc
+  const raw = root?.Items?.Item || root?.Products?.Product || []
+  const arr = Array.isArray(raw) ? raw : (raw ? [raw] : [])
 
   const prices = {}
   for (const p of arr) {
     if (!p) continue
-    const code = String(p?.ItemCode ?? '').trim()
+    const code = String(p?.ItemCode ?? p?.barcode ?? '').trim()
     const price = parseFloat(p?.ItemPrice ?? p?.Price ?? 0)
-    if (code.length >= 8 && /^\d+$/.test(code) && price > 0) {
+    if (code.length >= 6 && /^\d+$/.test(code) && price > 0) {
       prices[code] = price
     }
   }
+  return prices
+}
 
-  console.log(`[Cerberus:${label}] Chain ${chainId} (${brand}) → ${Object.keys(prices).length} barcodes`)
-  return { brand, prices }
+/** Scrape one chain → { barcode: price } */
+async function scrapeChain(chainName, brandKey) {
+  console.log(`[Cerberus:${chainName}] Fetching file list...`)
+  const files = await getFileList(chainName)
+  console.log(`[Cerberus:${chainName}] Found ${files.length} files`)
+
+  if (files.length === 0) return {}
+
+  // Download first 3 files for representative coverage (PriceFull preferred)
+  const toDownload = files.slice(0, 3)
+  const merged = {}
+
+  for (const url of toDownload) {
+    try {
+      const prices = await parseGzFile(url)
+      for (const [barcode, price] of Object.entries(prices)) {
+        if (!(barcode in merged) || price < merged[barcode]) {
+          merged[barcode] = price
+        }
+      }
+      console.log(`[Cerberus:${chainName}] File OK — ${Object.keys(prices).length} barcodes`)
+    } catch (err) {
+      console.warn(`[Cerberus:${chainName}] File error: ${err.message.substring(0, 80)}`)
+    }
+  }
+
+  return merged
 }
 
 export async function scrape() {
-  const user = process.env.CERBERUS_USER
-  const pass = process.env.CERBERUS_PASS
+  const result = {}
 
-  if (!user || !pass) {
-    console.log('[Cerberus] No credentials set (CERBERUS_USER / CERBERUS_PASS) — skipping')
-    return {}
-  }
-
-  try {
-    console.log('[Cerberus] Logging in...')
-    const cookie = await login(user, pass)
-
-    const files = await getFileList(cookie)
-    console.log(`[Cerberus] Found ${files.length} files`)
-
-    // One representative file per chain
-    const seen = new Set()
-    const result = {}
-
-    for (const url of files) {
-      const fnMatch = url.match(/Price(\d{13})-/)
-      const chainId = fnMatch?.[1]
-      if (!chainId || seen.has(chainId)) continue
-      seen.add(chainId)
-
-      const brand = CHAIN_MAP[chainId]
-      if (!brand) continue
-
-      try {
-        const { prices } = await parseGzFile(url, cookie, chainId)
-        if (!result[brand]) result[brand] = {}
+  for (const [chainName, brandKey] of Object.entries(CHAINS)) {
+    try {
+      const prices = await scrapeChain(chainName, brandKey)
+      const count = Object.keys(prices).length
+      if (count > 0) {
+        if (!result[brandKey]) result[brandKey] = {}
         for (const [barcode, price] of Object.entries(prices)) {
-          if (!(barcode in result[brand]) || price < result[brand][barcode]) {
-            result[brand][barcode] = price
+          if (!(barcode in result[brandKey]) || price < result[brandKey][barcode]) {
+            result[brandKey][barcode] = price
           }
         }
-      } catch (err) {
-        console.warn(`[Cerberus] File error for chain ${chainId}: ${err.message}`)
+        console.log(`[Cerberus] ${chainName} → ${count} barcodes (${brandKey})`)
       }
+    } catch (err) {
+      console.warn(`[Cerberus:${chainName}] Scrape failed: ${err.message}`)
     }
-
-    return result
-  } catch (err) {
-    console.warn(`[Cerberus] Scrape failed: ${err.message}`)
-    return {}
   }
+
+  return result
 }
