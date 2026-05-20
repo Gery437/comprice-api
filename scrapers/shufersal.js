@@ -2,10 +2,6 @@
  * Shufersal scraper — prices.shufersal.co.il
  * Covers: שופרסל שלי (001), שופרסל דיל (002), שופרסל אקספרס (003),
  *         שופרסל BE (007), יש חסד (008)
- *
- * Site returns a table of .gz file links with Azure SAS tokens.
- * Each file is a gzipped XML with all products for one store.
- * We pick 1 representative store per sub-chain to keep download size manageable.
  */
 
 import axios from 'axios'
@@ -16,98 +12,115 @@ import { XMLParser } from 'fast-xml-parser'
 const gunzip = promisify(zlib.gunzip)
 const BASE = 'http://prices.shufersal.co.il'
 
-// Sub-chain IDs → brand name
 const SUBCHAIN_MAP = {
-  '001': 'shufersal', // שופרסל שלי
-  '002': 'shufersal', // שופרסל דיל
-  '003': 'shufersal', // שופרסל אקספרס
-  '007': 'shufersal', // שופרסל BE
-  '008': 'yesh',      // יש חסד
+  '001': 'shufersal',
+  '002': 'shufersal',
+  '003': 'shufersal',
+  '007': 'shufersal',
+  '008': 'yesh',
 }
 
-/** Fetch file listing and return { subChain → downloadUrl } for PriceFull or Price files */
+/** Decode HTML entities in URLs (&amp; → &) */
+function decodeHtml(str) {
+  return str.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
+}
+
+/** Fetch listing → { subChain: url } picking one file per sub-chain */
 async function getRepresentativeUrls() {
   const res = await axios.get(BASE, {
-    timeout: 20000,
+    timeout: 30000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
   })
 
   const html = res.data
+  console.log(`[Shufersal] Listing page size: ${html.length} bytes`)
 
-  // Match href="<azure-blob-url>" — prefer PriceFull, fallback to Price
-  const fullRe = /href="(https?:\/\/[^"]*PriceFull[^"]*\.gz[^"]*)"/gi
-  const priceRe = /href="(https?:\/\/[^"]*Price[^"]*\.gz[^"]*)"/gi
-
+  // Match ANY .gz href — both absolute (https://...) and relative paths
+  const re = /href="([^"]*\.gz[^"]*)"/gi
   const bySubchain = {}
+  let totalFound = 0
+  let m
 
-  for (const re of [fullRe, priceRe]) {
-    let m
-    while ((m = re.exec(html)) !== null) {
-      const url = m[1]
-      // Extract sub-chain from filename, e.g. Price7290027600007-001-003-...
-      const fnMatch = url.match(/Price[^-]+-(\d{3})-\d/)
-      const subChain = fnMatch ? fnMatch[1] : 'unknown'
-      if (!bySubchain[subChain]) {
-        bySubchain[subChain] = url
-      }
+  while ((m = re.exec(html)) !== null) {
+    totalFound++
+    // Decode HTML entities (SAS tokens have & encoded as &amp; in HTML)
+    const rawHref = decodeHtml(m[1])
+    // Make absolute URL
+    const url = rawHref.startsWith('http') ? rawHref
+      : rawHref.startsWith('/') ? `http://prices.shufersal.co.il${rawHref}`
+      : `http://prices.shufersal.co.il/${rawHref}`
+
+    // Extract sub-chain from filename: Price{chainId}-{subchain}-{store}-...
+    const fnMatch = url.match(/\/Price[^/]*?-(\d{3})-\d{3}-/)
+      || url.match(/Price[^-]+-(\d{3})-\d/)
+    const subChain = fnMatch ? fnMatch[1] : null
+    if (subChain && !bySubchain[subChain]) {
+      bySubchain[subChain] = url
     }
-    if (Object.keys(bySubchain).length >= 5) break
   }
 
+  console.log(`[Shufersal] Found ${totalFound} gz links, sub-chains: ${Object.keys(bySubchain).join(', ')}`)
   return bySubchain
 }
 
 /** Download + decompress + parse one .gz XML file → { barcode: price } */
 async function parseGzFile(url, label) {
+  console.log(`[Shufersal:${label}] Downloading...`)
   const res = await axios.get(url, {
     responseType: 'arraybuffer',
-    timeout: 90000,
+    timeout: 120000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
+    maxContentLength: 50 * 1024 * 1024, // 50MB max
   })
 
-  const xml = (await gunzip(Buffer.from(res.data))).toString('utf8')
+  const compressed = Buffer.from(res.data)
+  console.log(`[Shufersal:${label}] Downloaded ${(compressed.length / 1024).toFixed(0)} KB compressed`)
+
+  const xml = (await gunzip(compressed)).toString('utf8')
+  console.log(`[Shufersal:${label}] Decompressed to ${(xml.length / 1024).toFixed(0)} KB XML`)
 
   const parser = new XMLParser({
     ignoreAttributes: false,
     parseTagValue: true,
     trimValues: true,
-    parseAttributeValue: true,
   })
   const doc = parser.parse(xml)
 
-  // Navigate XML structure — Shufersal uses <root><Products><Product>
+  // Shufersal XML: <root><Products><Product>...</Product></Products></root>
   const root = doc?.root || doc?.Prices || doc
-  const products =
-    root?.Products?.Product ||
-    root?.Items?.Item ||
-    root?.product ||
-    []
+  const raw = root?.Products?.Product || root?.Items?.Item || []
+  const arr = Array.isArray(raw) ? raw : [raw]
 
-  const arr = Array.isArray(products) ? products : [products]
   const prices = {}
-
   for (const p of arr) {
     if (!p) continue
     const code = String(p?.ItemCode ?? p?.barcode ?? p?.Barcode ?? '').trim()
     const price = parseFloat(p?.ItemPrice ?? p?.Price ?? p?.price ?? 0)
-
-    // Only accept valid EAN-like codes (8–14 digits) and positive prices
-    if (code.length >= 8 && /^\d+$/.test(code) && price > 0) {
+    if (code.length >= 6 && /^\d+$/.test(code) && price > 0) {
       prices[code] = price
     }
   }
 
-  console.log(`[Shufersal:${label}] Parsed ${arr.length} items → ${Object.keys(prices).length} valid barcodes`)
+  console.log(`[Shufersal:${label}] ${arr.length} items → ${Object.keys(prices).length} barcodes`)
   return prices
 }
 
-/** Main export: scrape all sub-chains, return { chainKey: { barcode: price } } */
 export async function scrape() {
-  console.log('[Shufersal] Fetching file listing...')
-  const urlMap = await getRepresentativeUrls()
-  console.log('[Shufersal] Sub-chains found:', Object.keys(urlMap).join(', '))
+  console.log('[Shufersal] Starting scrape...')
 
-  // Result buckets per brand key
+  let urlMap
+  try {
+    urlMap = await getRepresentativeUrls()
+  } catch (err) {
+    console.error('[Shufersal] Failed to fetch listing:', err.message)
+    return { shufersal: {}, yesh: {} }
+  }
+
+  if (Object.keys(urlMap).length === 0) {
+    console.warn('[Shufersal] No files found in listing!')
+    return { shufersal: {}, yesh: {} }
+  }
+
   const result = { shufersal: {}, yesh: {} }
 
   for (const [subChain, url] of Object.entries(urlMap)) {
@@ -117,22 +130,22 @@ export async function scrape() {
       continue
     }
     try {
-      console.log(`[Shufersal] Downloading sub-chain ${subChain} (${brand})...`)
       const prices = await parseGzFile(url, subChain)
-
+      let added = 0
       for (const [barcode, price] of Object.entries(prices)) {
-        // Keep lowest price if barcode appears in multiple sub-chain stores
         if (!(barcode in result[brand]) || price < result[brand][barcode]) {
           result[brand][barcode] = price
+          added++
         }
       }
+      console.log(`[Shufersal:${subChain}] Merged ${added} barcodes into "${brand}"`)
     } catch (err) {
-      console.warn(`[Shufersal] Sub-chain ${subChain} failed: ${err.message}`)
+      console.warn(`[Shufersal:${subChain}] Failed: ${err.message}`)
     }
   }
 
   const shuf = Object.keys(result.shufersal).length
   const yesh = Object.keys(result.yesh).length
-  console.log(`[Shufersal] Done — shufersal: ${shuf}, yesh: ${yesh} barcodes`)
+  console.log(`[Shufersal] Done — shufersal: ${shuf}, yesh: ${yesh} total barcodes`)
   return result
 }
