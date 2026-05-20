@@ -87,6 +87,72 @@ app.get('/api/info', (req, res) => {
   res.json(getCacheInfo())
 })
 
+// ── Diagnostic: test shufersal listing page ───────────────────
+app.get('/api/debug/shufersal', async (req, res) => {
+  try {
+    const axios = (await import('axios')).default
+    const BASE = 'http://prices.shufersal.co.il'
+    const htmlRes = await axios.get(BASE, {
+      timeout: 30000,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
+    })
+    const html = htmlRes.data
+
+    // Count gz links
+    const reAll = /href="([^"]*\.gz[^"]*)"/gi
+    const urls = []
+    let m
+    while ((m = reAll.exec(html)) !== null) urls.push(m[1])
+
+    // Sample first 3 URLs (truncated, no full SAS token)
+    const samples = urls.slice(0, 3).map(u => {
+      const decoded = u.replace(/&amp;/g, '&')
+      return decoded.substring(0, 120) + '...'
+    })
+
+    // Try downloading first URL
+    let downloadTest = null
+    if (urls.length > 0) {
+      try {
+        const url = urls[0].replace(/&amp;/g, '&')
+        const full = url.startsWith('http') ? url : `${BASE}/${url}`
+        const dlRes = await axios.get(full, {
+          responseType: 'arraybuffer',
+          timeout: 30000,
+          headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
+        })
+        const { gunzipSync } = await import('zlib')
+        const xml = gunzipSync(Buffer.from(dlRes.data)).toString('utf8')
+        const { XMLParser } = await import('fast-xml-parser')
+        const parser = new XMLParser({ parseTagValue: true, trimValues: true })
+        const doc = parser.parse(xml)
+        const root = doc?.root || doc?.Prices || doc
+        const prods = root?.Products?.Product || root?.Items?.Item || []
+        const arr = Array.isArray(prods) ? prods : [prods]
+        const sample = arr[0] ? JSON.stringify(arr[0]).substring(0, 300) : 'none'
+        downloadTest = {
+          ok: true,
+          compressedKB: Math.round(dlRes.data.byteLength / 1024),
+          xmlKB: Math.round(xml.length / 1024),
+          productCount: arr.length,
+          firstProduct: sample,
+        }
+      } catch (e) {
+        downloadTest = { ok: false, error: e.message }
+      }
+    }
+
+    res.json({
+      htmlSizeKB: Math.round(html.length / 1024),
+      gzLinksFound: urls.length,
+      sampleUrls: samples,
+      downloadTest,
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // ── Start server ──────────────────────────────────────────────
 const PORT = process.env.PORT || 3001
 app.listen(PORT, async () => {
