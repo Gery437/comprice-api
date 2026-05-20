@@ -7,14 +7,31 @@ import { scrape as scrapeShufersal } from './shufersal.js'
 import { scrape as scrapeCerberus } from './cerberus.js'
 import { setCache } from '../cache.js'
 
+/** Wrap a promise with a max timeout — resolves to null if time exceeded */
+function withTimeout(promise, ms, label) {
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      console.warn(`[timeout] ${label} exceeded ${ms / 1000}s — skipping`)
+      resolve(null)
+    }, ms)
+    promise.then(
+      (v) => { clearTimeout(t); resolve(v) },
+      (e) => { clearTimeout(t); console.error(`[error] ${label}: ${e.message}`); resolve(null) }
+    )
+  })
+}
+
 export async function refreshAllPrices() {
   console.log('\n========== Starting price refresh ==========')
   const startTime = Date.now()
 
-  // Run all scrapers (don't let one failure stop others)
-  const [shufersalResult, cerberusResult] = await Promise.allSettled([
-    scrapeShufersal(),
-    scrapeCerberus(),
+  // Run all scrapers in parallel, each with a max timeout
+  const MAX_SHUFERSAL = 3 * 60 * 1000  // 3 minutes
+  const MAX_CERBERUS  = 2 * 60 * 1000  // 2 minutes
+
+  const [shufersalResult, cerberusResult] = await Promise.all([
+    withTimeout(scrapeShufersal(), MAX_SHUFERSAL, 'Shufersal'),
+    withTimeout(scrapeCerberus(),  MAX_CERBERUS,  'Cerberus'),
   ])
 
   // Merge all chain results into one map: barcode → { chain: price }
@@ -35,23 +52,17 @@ export async function refreshAllPrices() {
     }
   }
 
-  // Process Shufersal result (returns { shufersal: {...}, yesh: {...} })
-  if (shufersalResult.status === 'fulfilled') {
-    const res = shufersalResult.value
-    mergeChain('shufersal', res.shufersal)
-    mergeChain('yesh', res.yesh)
-  } else {
-    console.error('[Shufersal] Scraper failed:', shufersalResult.reason?.message)
+  // Shufersal returns { shufersal: {...}, yesh: {...} }
+  if (shufersalResult) {
+    mergeChain('shufersal', shufersalResult.shufersal)
+    mergeChain('yesh', shufersalResult.yesh)
   }
 
-  // Process Cerberus result (returns { ramilevi: {...}, yohananof: {...}, osher: {...} })
-  if (cerberusResult.status === 'fulfilled') {
-    const res = cerberusResult.value
-    for (const [chain, data] of Object.entries(res)) {
+  // Cerberus returns { ramilevi: {...}, yohananof: {...}, osher: {...}, ... }
+  if (cerberusResult) {
+    for (const [chain, data] of Object.entries(cerberusResult)) {
       mergeChain(chain, data)
     }
-  } else {
-    console.error('[Cerberus] Scraper failed:', cerberusResult.reason?.message)
   }
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)

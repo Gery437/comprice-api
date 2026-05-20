@@ -35,7 +35,7 @@ async function getFileList(chainName) {
   const url = `${BASE}/file/d/${chainName}/`
   const res = await axios.get(url, {
     httpsAgent,
-    timeout: 20000,
+    timeout: 12000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
   })
   const html = res.data
@@ -56,7 +56,7 @@ async function parseGzFile(url) {
   const res = await axios.get(url, {
     httpsAgent,
     responseType: 'arraybuffer',
-    timeout: 120000,
+    timeout: 30000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
     maxContentLength: 50 * 1024 * 1024,
   })
