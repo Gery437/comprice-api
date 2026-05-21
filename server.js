@@ -234,18 +234,11 @@ app.get('/api/debug/cerberus', async (req, res) => {
         { httpsAgent: agent, timeout: 10000, maxRedirects: 0,
           headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0', Cookie: cookies1 },
           validateStatus: s => s < 500 })
-      const cookie = [...(loginPage.headers['set-cookie'] || []), ...(loginRes.headers['set-cookie'] || [])]
-        .map(c => c.split(';')[0]).join('; ')
       const loginOk = loginRes.status === 302
       const loginSetCookies = loginRes.headers['set-cookie'] || []
       const loginPageSetCookies = loginPage.headers['set-cookie'] || []
 
-      // Step 3: GET file page → new CSRF
-      const filePage = await axios.get(`${BASE}/file/d/${chain}/`,
-        { httpsAgent: agent, timeout: 10000, headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
-      const csrf2 = extractCsrf(filePage.data)
-
-      // Merge cookies properly
+      // Merge cookies (later values override earlier — deduped by name)
       function mergeCookies(...arrays) {
         const map = new Map()
         for (const arr of arrays) for (const h of (arr||[])) {
@@ -254,6 +247,14 @@ app.get('/api/debug/cerberus', async (req, res) => {
         }
         return [...map.values()].join('; ')
       }
+      // Use only the authenticated session cookie (loginRes overrides loginPage for same name)
+      const cookie = mergeCookies(loginPage.headers['set-cookie'], loginRes.headers['set-cookie'])
+
+      // Step 3: GET file page → new CSRF (uses authenticated session cookie)
+      const filePage = await axios.get(`${BASE}/file/d/${chain}/`,
+        { httpsAgent: agent, timeout: 10000, headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+      const csrf2 = extractCsrf(filePage.data)
+
       const filePageCookies = filePage.headers['set-cookie'] || []
       const cookieFinal = mergeCookies(loginPage.headers['set-cookie'], loginRes.headers['set-cookie'], filePageCookies)
       const filePageIsLogin = filePage.data.includes('id="login-form"')
