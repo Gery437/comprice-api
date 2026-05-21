@@ -57,10 +57,10 @@ function mergeCookies(...headerArrays) {
   return [...map.values()].join('; ')
 }
 
-/** Full auth flow:
- *  1. GET /login → csrf1 + session cookie
- *  2. POST /login/user (follow redirects to /file/d/{chain}/) → authenticated session + csrf2
- *  Returns { cookie, csrf } ready for DataTables API calls
+/** Full 3-step auth flow → returns { cookie, csrf } ready for DataTables API calls
+ *  1. GET /login → csrf1 + initial session cookie
+ *  2. POST /login/user (maxRedirects:0) → 302 + NEW authenticated session cookie
+ *  3. GET /file/d/{chain}/ with authenticated cookie → CSRF token for API calls
  */
 async function authenticate(chainName) {
   // Step 1: GET login page → initial CSRF + session cookie
@@ -72,36 +72,9 @@ async function authenticate(chainName) {
   const csrf1 = extractCsrf(loginPage.data)
   const cookie1 = mergeCookies(loginPage.headers['set-cookie'])
 
-  // Step 2: POST login, redirect to /file/d/{chain}/ → authenticated file listing page
-  // Axios follows the 302 redirect automatically (maxRedirects: 5)
-  // The redirect chain updates the session to authenticated
-  // We capture cookies from EACH redirect step using a custom interceptor
-  const cookieJar = new Map()
-
-  // Seed with login page cookies
-  for (const h of (loginPage.headers['set-cookie'] || [])) {
-    const [pair] = h.split(';')
-    const eq = pair.indexOf('=')
-    if (eq > 0) cookieJar.set(pair.substring(0, eq).trim(), pair.trim())
-  }
-
-  const axiosWithRedirects = axios.create({
-    httpsAgent,
-    timeout: 15000,
-    validateStatus: (s) => s < 500,
-  })
-
-  // Capture cookies from every redirect
-  axiosWithRedirects.interceptors.response.use((response) => {
-    for (const h of (response.headers['set-cookie'] || [])) {
-      const [pair] = h.split(';')
-      const eq = pair.indexOf('=')
-      if (eq > 0) cookieJar.set(pair.substring(0, eq).trim(), pair.trim())
-    }
-    return response
-  })
-
-  const filePage = await axiosWithRedirects.post(
+  // Step 2: POST login → 302 + Set-Cookie with NEW authenticated session
+  // Do NOT follow redirect — we need the Set-Cookie from the 302 response
+  const loginRes = await axios.post(
     `${BASE}/login/user`,
     new URLSearchParams({
       username: chainName,
@@ -110,23 +83,47 @@ async function authenticate(chainName) {
       csrftoken: csrf1,
     }).toString(),
     {
-      maxRedirects: 5,
+      httpsAgent,
+      timeout: 12000,
+      maxRedirects: 0,
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
         Cookie: cookie1,
       },
+      validateStatus: (s) => s < 500,
     }
   )
+  if (loginRes.status !== 302) {
+    throw new Error(`Login failed for ${chainName} — status ${loginRes.status} (expected 302)`)
+  }
 
-  const cookieFinal = [...cookieJar.values()].join('; ')
-  const csrf2 = extractCsrf(filePage.data)
+  // Merge cookies: loginRes overrides loginPage for the same cookie name
+  const cookie2 = mergeCookies(loginPage.headers['set-cookie'], loginRes.headers['set-cookie'])
+
+  // Step 3: GET file listing page with authenticated cookie → extract CSRF for DataTables API
+  const filePage = await axios.get(`${BASE}/file/d/${chainName}/`, {
+    httpsAgent,
+    timeout: 12000,
+    headers: {
+      Cookie: cookie2,
+      'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
+    },
+    validateStatus: (s) => s < 500,
+  })
   const isLoginPage = filePage.data.includes('id="login-form"')
+  if (isLoginPage) throw new Error(`Auth failed for ${chainName} — file page returned login form`)
 
-  if (isLoginPage) throw new Error(`Auth failed for ${chainName} — still on login page after redirect`)
+  const csrf2 = extractCsrf(filePage.data)
   if (!csrf2) throw new Error(`No CSRF token on file page for ${chainName}`)
 
-  console.log(`[Cerberus:${chainName}] Auth OK (csrf=${csrf2.substring(0,10)}...)`)
+  // Include any new cookies set on the file page
+  const cookieFinal = mergeCookies(
+    loginPage.headers['set-cookie'],
+    loginRes.headers['set-cookie'],
+    filePage.headers['set-cookie']
+  )
+  console.log(`[Cerberus:${chainName}] Auth OK`)
   return { cookie: cookieFinal, csrf: csrf2 }
 }
 
