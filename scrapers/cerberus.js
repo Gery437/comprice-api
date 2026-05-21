@@ -2,8 +2,12 @@
  * Cerberus scraper — url.publishedprices.co.il
  * Covers: רמי לוי, יוחננוף, אושר עד, חצי חינם, טיב טעם
  *
- * Login: POST /login/user with username + empty password → session cookie
- * Files: GET /file/d/{ChainName}/ with cookie
+ * Auth flow (3-step with CSRF):
+ *   1. GET /login → extract csrftoken from meta tag
+ *   2. POST /login/user with username + csrftoken + r redirect param → session cookie
+ *   3. GET /file/d/{chain}/ → extract new csrftoken for API calls
+ *   4. POST /file/json/dir/d/{chain}/ with DataTables params + csrftoken → file list JSON
+ *   5. Download + parse PriceFull gz files
  */
 
 import axios from 'axios'
@@ -24,60 +28,124 @@ const CHAINS = {
   HaziHinam: 'osher',
 }
 
-/** Login and return session cookie string */
-async function login(username) {
-  const res = await axios.post(
+const FILES_PER_CHAIN = {
+  RamiLevi:  5,
+  Yohananof: 4,
+  osherad:   4,
+  HaziHinam: 3,
+}
+
+function extractCsrf(html) {
+  const m = html.match(/csrftoken['"]\s+content=['"]([^'"]+)['"]/)
+    || html.match(/name=['"]csrftoken['"][^>]+value=['"]([^'"]+)['"]/)
+    || html.match(/content=['"]([^'"]+)['"]\s+name=['"]csrftoken['"]/)
+  return m ? m[1] : ''
+}
+
+/** Full 3-step auth flow → returns { cookie, csrf } */
+async function authenticate(chainName) {
+  // Step 1: GET login page → extract initial CSRF
+  const loginPage = await axios.get(`${BASE}/login`, {
+    httpsAgent, timeout: 12000,
+    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
+    validateStatus: (s) => s < 500,
+  })
+  const csrf1 = extractCsrf(loginPage.data)
+  const cookies1 = (loginPage.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ')
+
+  // Step 2: POST login with CSRF token → get session cookie
+  const loginRes = await axios.post(
     `${BASE}/login/user`,
-    new URLSearchParams({ username, password: '' }).toString(),
+    new URLSearchParams({
+      username: chainName,
+      password: '',
+      r: `/file/json/dir/d/${chainName}/`,
+      csrftoken: csrf1,
+    }).toString(),
     {
       httpsAgent,
       timeout: 12000,
-      maxRedirects: 5,
+      maxRedirects: 0,
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
+        'Cookie': cookies1,
       },
       validateStatus: (s) => s < 500,
     }
   )
-  const setCookie = res.headers['set-cookie'] || []
-  const cookie = setCookie.map((c) => c.split(';')[0]).join('; ')
-  if (!cookie) throw new Error(`No cookie returned for ${username}`)
-  return cookie
-}
 
-/** Get list of .gz file URLs for a chain (requires valid cookie) */
-async function getFileList(chainName, cookie) {
-  const res = await axios.get(`${BASE}/file/d/${chainName}/`, {
+  // Collect all cookies
+  const allSetCookies = [
+    ...(loginPage.headers['set-cookie'] || []),
+    ...(loginRes.headers['set-cookie'] || []),
+  ]
+  const cookie = allSetCookies.map(c => c.split(';')[0]).join('; ')
+  if (!cookie) throw new Error(`No cookie for ${chainName}`)
+
+  // Step 3: GET file listing page → extract new CSRF token for API
+  const filePage = await axios.get(`${BASE}/file/d/${chainName}/`, {
     httpsAgent,
     timeout: 12000,
     headers: {
       Cookie: cookie,
       'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
     },
+    validateStatus: (s) => s < 500,
   })
-  const html = res.data
-  const re = /href="([^"]*(?:PriceFull|Price)[^"]*\.gz[^"]*)"/gi
-  const files = []
-  let m
-  while ((m = re.exec(html)) !== null) {
-    const name = m[1].replace(/&amp;/g, '&')
-    files.push(name.startsWith('http') ? name : `${BASE}/file/d/${chainName}/${name}`)
-  }
-  return files
+  const csrf2 = extractCsrf(filePage.data)
+  if (!csrf2) throw new Error(`No CSRF token on file page for ${chainName}`)
+
+  return { cookie, csrf: csrf2 }
 }
 
-/** Download + decompress + parse one .gz file → { barcode: price } */
+/** Get list of PriceFull filenames via DataTables JSON API */
+async function getPriceFullFiles(chainName, cookie, csrf, maxFiles = 5) {
+  const res = await axios.post(
+    `${BASE}/file/json/dir/d/${chainName}/`,
+    new URLSearchParams({
+      sEcho: '1',
+      iDisplayStart: '0',
+      iDisplayLength: '100',
+      sSearch: 'PriceFull',
+      iSortCol_0: '3',
+      sSortDir_0: 'desc',
+      csrftoken: csrf,
+    }).toString(),
+    {
+      httpsAgent,
+      timeout: 15000,
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Cookie: cookie,
+        'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
+      },
+      validateStatus: (s) => s < 500,
+    }
+  )
+
+  const data = res.data
+  if (!data?.aaData?.length) {
+    throw new Error(`No PriceFull files listed for ${chainName} (aaData empty)`)
+  }
+
+  return data.aaData
+    .filter(f => f.fname && /PriceFull/i.test(f.fname))
+    .slice(0, maxFiles)
+    .map(f => `${BASE}/file/d/${chainName}/${f.fname}`)
+}
+
+/** Download + decompress + parse one PriceFull .gz file → { barcode: price } */
 async function parseGzFile(url, cookie) {
   const res = await axios.get(url, {
     httpsAgent,
     responseType: 'arraybuffer',
-    timeout: 30000,
+    timeout: 60000,
     headers: {
       Cookie: cookie,
       'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
     },
-    maxContentLength: 50 * 1024 * 1024,
+    maxContentLength: 100 * 1024 * 1024,
   })
 
   const xml = (await gunzip(Buffer.from(res.data))).toString('utf8')
@@ -94,29 +162,39 @@ async function parseGzFile(url, cookie) {
     const code = String(p?.ItemCode ?? '').trim()
     const price = parseFloat(p?.ItemPrice ?? p?.Price ?? 0)
     if (code.length >= 6 && /^\d+$/.test(code) && price > 0) {
-      prices[code] = price
+      if (!(code in prices) || price < prices[code]) {
+        prices[code] = price
+      }
     }
   }
   return prices
 }
 
-/** Scrape one chain after login */
-async function scrapeChain(chainName) {
-  const cookie = await login(chainName)
-  const files = await getFileList(chainName, cookie)
-  console.log(`[Cerberus:${chainName}] ${files.length} files found`)
-  if (!files.length) return {}
+/** Scrape one chain end-to-end */
+async function scrapeChain(chainName, maxFiles) {
+  const { cookie, csrf } = await authenticate(chainName)
+  const urls = await getPriceFullFiles(chainName, cookie, csrf, maxFiles)
+  console.log(`[Cerberus:${chainName}] ${urls.length} PriceFull files`)
 
   const merged = {}
-  for (const url of files.slice(0, 3)) {
-    try {
-      const prices = await parseGzFile(url, cookie)
-      for (const [b, p] of Object.entries(prices)) {
-        if (!(b in merged) || p < merged[b]) merged[b] = p
-      }
-      console.log(`[Cerberus:${chainName}] file OK — ${Object.keys(prices).length} barcodes`)
-    } catch (err) {
-      console.warn(`[Cerberus:${chainName}] file error: ${err.message.substring(0, 80)}`)
+  const downloads = urls.map(url =>
+    parseGzFile(url, cookie)
+      .then(prices => {
+        const n = Object.keys(prices).length
+        console.log(`[Cerberus:${chainName}] file OK — ${n} barcodes`)
+        return prices
+      })
+      .catch(err => {
+        console.warn(`[Cerberus:${chainName}] file error: ${err.message.substring(0, 80)}`)
+        return null
+      })
+  )
+
+  const results = await Promise.all(downloads)
+  for (const prices of results) {
+    if (!prices) continue
+    for (const [b, p] of Object.entries(prices)) {
+      if (!(b in merged) || p < merged[b]) merged[b] = p
     }
   }
   return merged
@@ -124,11 +202,12 @@ async function scrapeChain(chainName) {
 
 export async function scrape() {
   const result = {}
-  // Run all chains in parallel
+
   await Promise.all(
     Object.entries(CHAINS).map(async ([chainName, brandKey]) => {
+      const maxFiles = FILES_PER_CHAIN[chainName] ?? 3
       try {
-        const prices = await scrapeChain(chainName)
+        const prices = await scrapeChain(chainName, maxFiles)
         const count = Object.keys(prices).length
         if (count > 0) {
           if (!result[brandKey]) result[brandKey] = {}
@@ -137,12 +216,13 @@ export async function scrape() {
               result[brandKey][b] = p
             }
           }
-          console.log(`[Cerberus] ✓ ${chainName} → ${count} barcodes`)
+          console.log(`[Cerberus] ✓ ${chainName} → ${count} barcodes merged into '${brandKey}'`)
         }
       } catch (err) {
         console.warn(`[Cerberus] ✗ ${chainName}: ${err.message}`)
       }
     })
   )
+
   return result
 }
