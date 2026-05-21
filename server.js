@@ -243,15 +243,30 @@ app.get('/api/debug/cerberus', async (req, res) => {
         { httpsAgent: agent, timeout: 10000, headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
       const csrf2 = extractCsrf(filePage.data)
 
-      // Step 4: POST JSON API for file list
+      // Merge cookies properly
+      function mergeCookies(...arrays) {
+        const map = new Map()
+        for (const arr of arrays) for (const h of (arr||[])) {
+          const [pair] = h.split(';'); const eq = pair.indexOf('=')
+          if (eq>0) map.set(pair.substring(0,eq).trim(), pair.trim())
+        }
+        return [...map.values()].join('; ')
+      }
+      const filePageCookies = filePage.headers['set-cookie'] || []
+      const cookieFinal = mergeCookies(loginPage.headers['set-cookie'], loginRes.headers['set-cookie'], filePageCookies)
+      const filePageIsLogin = filePage.data.includes('id="login-form"')
+
+      // Step 4: POST JSON API for file list (with all merged cookies)
       const listRes = await axios.post(`${BASE}/file/json/dir/d/${chain}/`,
-        new URLSearchParams({ sEcho: '1', iDisplayStart: '0', iDisplayLength: '10', sSearch: 'PriceFull', csrftoken: csrf2 }).toString(),
-        { httpsAgent: agent, timeout: 10000, headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+        new URLSearchParams({ sEcho: '1', iDisplayStart: '0', iDisplayLength: '20',
+          sSearch: 'PriceFull', iSortCol_0: '3', sSortDir_0: 'desc', csrftoken: csrf2 }).toString(),
+        { httpsAgent: agent, timeout: 10000, headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookieFinal, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
 
       const data = listRes.data
       const files = Array.isArray(data?.aaData) ? data.aaData.slice(0, 3).map(f => f.fname) : []
       results[chain] = { ok: true, loginOk, csrf1: csrf1.substring(0, 10), csrf2: csrf2.substring(0, 10),
-        cookie: !!cookie, priceFullFiles: files, total: data?.iTotalRecords ?? 0, error: data?.error }
+        filePageIsLogin, cookieSample: cookieFinal.substring(0, 30),
+        priceFullFiles: files, total: data?.iTotalRecords ?? 0, apiError: data?.error }
     } catch (err) {
       results[chain] = { ok: false, error: err.message.substring(0, 120) }
     }

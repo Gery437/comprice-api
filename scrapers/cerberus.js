@@ -42,18 +42,33 @@ function extractCsrf(html) {
   return m ? m[1] : ''
 }
 
+/** Merge Set-Cookie headers into a single cookie string (later values override earlier) */
+function mergeCookies(...headerArrays) {
+  const map = new Map()
+  for (const headers of headerArrays) {
+    for (const h of (headers || [])) {
+      const [pair] = h.split(';')
+      const eqIdx = pair.indexOf('=')
+      if (eqIdx < 0) continue
+      const name = pair.substring(0, eqIdx).trim()
+      map.set(name, pair.trim())
+    }
+  }
+  return [...map.values()].join('; ')
+}
+
 /** Full 3-step auth flow → returns { cookie, csrf } */
 async function authenticate(chainName) {
-  // Step 1: GET login page → extract initial CSRF
+  // Step 1: GET login page → extract initial CSRF + session cookie
   const loginPage = await axios.get(`${BASE}/login`, {
     httpsAgent, timeout: 12000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
     validateStatus: (s) => s < 500,
   })
   const csrf1 = extractCsrf(loginPage.data)
-  const cookies1 = (loginPage.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ')
+  const cookie1 = mergeCookies(loginPage.headers['set-cookie'])
 
-  // Step 2: POST login with CSRF token → get session cookie
+  // Step 2: POST login with CSRF token → authenticated session
   const loginRes = await axios.post(
     `${BASE}/login/user`,
     new URLSearchParams({
@@ -69,26 +84,25 @@ async function authenticate(chainName) {
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
-        'Cookie': cookies1,
+        Cookie: cookie1,
       },
       validateStatus: (s) => s < 500,
     }
   )
+  if (loginRes.status !== 302) {
+    throw new Error(`Login failed for ${chainName} — status ${loginRes.status} (expected 302)`)
+  }
 
-  // Collect all cookies
-  const allSetCookies = [
-    ...(loginPage.headers['set-cookie'] || []),
-    ...(loginRes.headers['set-cookie'] || []),
-  ]
-  const cookie = allSetCookies.map(c => c.split(';')[0]).join('; ')
-  if (!cookie) throw new Error(`No cookie for ${chainName}`)
+  // Merge cookies: login GET + login POST (login POST updates session to authenticated)
+  const cookie2 = mergeCookies(loginPage.headers['set-cookie'], loginRes.headers['set-cookie'])
 
-  // Step 3: GET file listing page → extract new CSRF token for API
+  // Step 3: GET file listing page → extract new CSRF token for API calls
+  // Also capture any new cookies set here
   const filePage = await axios.get(`${BASE}/file/d/${chainName}/`, {
     httpsAgent,
     timeout: 12000,
     headers: {
-      Cookie: cookie,
+      Cookie: cookie2,
       'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
     },
     validateStatus: (s) => s < 500,
@@ -96,7 +110,15 @@ async function authenticate(chainName) {
   const csrf2 = extractCsrf(filePage.data)
   if (!csrf2) throw new Error(`No CSRF token on file page for ${chainName}`)
 
-  return { cookie, csrf: csrf2 }
+  // Final merged cookie (include any new cookies from file page)
+  const cookieFinal = mergeCookies(
+    loginPage.headers['set-cookie'],
+    loginRes.headers['set-cookie'],
+    filePage.headers['set-cookie']
+  )
+
+  console.log(`[Cerberus:${chainName}] Auth OK — cookie=${cookieFinal.substring(0,20)}...`)
+  return { cookie: cookieFinal, csrf: csrf2 }
 }
 
 /** Get list of PriceFull filenames via DataTables JSON API */
