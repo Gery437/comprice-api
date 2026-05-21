@@ -89,47 +89,55 @@ async function parsePriceFullFile(url, label) {
 export async function scrape() {
   console.log('[Shufersal] Scanning pages for PriceFull files...')
 
-  // Scan pages to find one PriceFull per sub-chain
-  const needed = new Set(Object.keys(SUBCHAIN_MAP))  // sub-chains we want
-  const found = {}  // subChain → url
+  // Scan pages to find up to FILES_PER_SUBCHAIN PriceFull per sub-chain
+  const FILES_PER_SUBCHAIN = 3
+  const found = {}  // subChain → [url, ...]
 
-  for (let page = 1; page <= 60 && needed.size > 0; page++) {
+  for (let page = 1; page <= 65; page++) {
+    // Stop early if we have enough files for all sub-chains
+    const allDone = Object.keys(SUBCHAIN_MAP).every(
+      sc => (found[sc] || []).length >= FILES_PER_SUBCHAIN
+    )
+    if (allDone) break
+
     try {
       const files = await fetchPage(page)
       let foundOnPage = 0
       for (const { url, subChain, isPriceFull } of files) {
-        if (isPriceFull && needed.has(subChain) && !found[subChain]) {
-          found[subChain] = url
-          needed.delete(subChain)
-          foundOnPage++
+        if (isPriceFull && SUBCHAIN_MAP[subChain]) {
+          if (!found[subChain]) found[subChain] = []
+          if (found[subChain].length < FILES_PER_SUBCHAIN) {
+            found[subChain].push(url)
+            foundOnPage++
+          }
         }
       }
       if (foundOnPage > 0) {
-        console.log(`[Shufersal] Page ${page}: found ${foundOnPage} PriceFull files (${Object.keys(found).length} total)`)
+        const total = Object.values(found).reduce((s, a) => s + a.length, 0)
+        console.log(`[Shufersal] Page ${page}: +${foundOnPage} PriceFull (${total} total)`)
       }
-      // Once we start finding PriceFull files, no need to scan too far ahead
-      if (Object.keys(found).length > 0 && foundOnPage === 0 && page > 40) break
+      if (Object.values(found).some(a => a.length > 0) && foundOnPage === 0 && page > 45) break
     } catch (err) {
       console.warn(`[Shufersal] Page ${page} error: ${err.message}`)
     }
   }
 
-  console.log(`[Shufersal] Found PriceFull for sub-chains: ${Object.keys(found).join(', ')}`)
-
   const result = { shufersal: {}, yesh: {} }
 
-  for (const [subChain, url] of Object.entries(found)) {
+  for (const [subChain, urls] of Object.entries(found)) {
     const brand = SUBCHAIN_MAP[subChain]
     if (!brand) continue
-    try {
-      const prices = await parsePriceFullFile(url, subChain)
-      for (const [barcode, price] of Object.entries(prices)) {
-        if (!(barcode in result[brand]) || price < result[brand][barcode]) {
-          result[brand][barcode] = price
+    for (const url of urls) {
+      try {
+        const prices = await parsePriceFullFile(url, subChain)
+        for (const [barcode, price] of Object.entries(prices)) {
+          if (!(barcode in result[brand]) || price < result[brand][barcode]) {
+            result[brand][barcode] = price
+          }
         }
+      } catch (err) {
+        console.warn(`[Shufersal:${subChain}] Parse error: ${err.message}`)
       }
-    } catch (err) {
-      console.warn(`[Shufersal:${subChain}] Parse error: ${err.message}`)
     }
   }
 

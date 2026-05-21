@@ -26,7 +26,7 @@ export async function refreshAllPrices() {
   const startTime = Date.now()
 
   // Run all scrapers in parallel, each with a max timeout
-  const MAX_SHUFERSAL = 3 * 60 * 1000  // 3 minutes
+  const MAX_SHUFERSAL = 8 * 60 * 1000  // 8 minutes (3 files × 8 sub-chains)
   const MAX_CERBERUS  = 2 * 60 * 1000  // 2 minutes
 
   const [shufersalResult, cerberusResult] = await Promise.all([
