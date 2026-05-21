@@ -122,10 +122,8 @@ app.get('/api/debug/pricefull', async (req, res) => {
       return name.includes('חלב') || name.includes('תנובה') || name.includes('milk')
     }).slice(0, 5)
 
-    // Sample first 3 items
-    const sample = arr.slice(0, 3).map(p => ({
-      ItemCode: p?.ItemCode, ItemName: p?.ItemName, ItemPrice: p?.ItemPrice
-    }))
+    // Sample first 3 items — show ALL fields
+    const sample = arr.slice(0, 3).map(p => JSON.parse(JSON.stringify(p)))
 
     res.json({
       file: pfUrl.substring(0, 80),
