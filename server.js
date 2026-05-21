@@ -237,6 +237,8 @@ app.get('/api/debug/cerberus', async (req, res) => {
       const cookie = [...(loginPage.headers['set-cookie'] || []), ...(loginRes.headers['set-cookie'] || [])]
         .map(c => c.split(';')[0]).join('; ')
       const loginOk = loginRes.status === 302
+      const loginSetCookies = loginRes.headers['set-cookie'] || []
+      const loginPageSetCookies = loginPage.headers['set-cookie'] || []
 
       // Step 3: GET file page → new CSRF
       const filePage = await axios.get(`${BASE}/file/d/${chain}/`,
@@ -265,7 +267,8 @@ app.get('/api/debug/cerberus', async (req, res) => {
       const data = listRes.data
       const files = Array.isArray(data?.aaData) ? data.aaData.slice(0, 3).map(f => f.fname) : []
       results[chain] = { ok: true, loginOk, csrf1: csrf1.substring(0, 10), csrf2: csrf2.substring(0, 10),
-        filePageIsLogin, cookieSample: cookieFinal.substring(0, 30),
+        filePageIsLogin, cookieSample: cookieFinal.substring(0, 40),
+        loginPageSetCookies, loginSetCookies,
         priceFullFiles: files, total: data?.iTotalRecords ?? 0, apiError: data?.error }
     } catch (err) {
       results[chain] = { ok: false, error: err.message.substring(0, 120) }
