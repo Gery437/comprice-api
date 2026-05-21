@@ -181,7 +181,8 @@ app.get('/api/debug/cerberus', async (req, res) => {
       const gzCount = (listRes.data.match(/\.gz/g) || []).length
 
       results[chain] = { ok: true, loginStatus: loginRes.status, hasCookie: !!cookie,
-        gzFiles: gzCount, listStatus: listRes.status, htmlKB: Math.round(listRes.data.length / 1024) }
+        gzFiles: gzCount, listStatus: listRes.status, htmlKB: Math.round(listRes.data.length / 1024),
+        htmlSample: listRes.data.substring(0, 600) }
     } catch (err) {
       results[chain] = { ok: false, error: err.message.substring(0, 120) }
     }
