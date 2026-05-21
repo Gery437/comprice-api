@@ -160,7 +160,7 @@ async function getPriceFullFiles(chainName, cookie, csrf, maxFiles = 5) {
   return data.aaData
     .filter(f => f.fname && /PriceFull/i.test(f.fname))
     .slice(0, maxFiles)
-    .map(f => `${BASE}/file/d/${chainName}/${f.fname}`)
+    .map(f => `${BASE}/file/d/${f.fname}`)  // no chainName in download path!
 }
 
 /** Download + decompress + parse one PriceFull .gz file → { barcode: price } */
