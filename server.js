@@ -87,6 +87,57 @@ app.get('/api/info', (req, res) => {
   res.json(getCacheInfo())
 })
 
+// ── Diagnostic: inspect PriceFull file content ───────────────
+app.get('/api/debug/pricefull', async (req, res) => {
+  try {
+    const axios = (await import('axios')).default
+    const zlib = await import('zlib')
+    const { promisify } = await import('util')
+    const { XMLParser } = await import('fast-xml-parser')
+    const gunzip = promisify(zlib.gunzip)
+    const BASE = 'http://prices.shufersal.co.il'
+
+    // Find first PriceFull file
+    let pfUrl = null
+    for (let page = 25; page <= 40 && !pfUrl; page++) {
+      const r = await axios.get(`${BASE}/?page=${page}`, { timeout: 15000,
+        headers: { 'User-Agent': 'Mozilla/5.0' } })
+      const m = r.data.match(/href="([^"]*PriceFull[^"]*\.gz[^"]*)"/)
+      if (m) pfUrl = m[1].replace(/&amp;/g,'&')
+    }
+    if (!pfUrl) return res.json({ error: 'No PriceFull found' })
+
+    const dl = await axios.get(pfUrl, { responseType: 'arraybuffer', timeout: 60000,
+      headers: { 'User-Agent': 'Mozilla/5.0' } })
+    const xml = (await gunzip(Buffer.from(dl.data))).toString('utf8')
+    const parser = new XMLParser({ parseTagValue: true, trimValues: true })
+    const doc = parser.parse(xml)
+    const root = doc?.Root || doc?.root || doc
+    const items = root?.Items?.Item || []
+    const arr = Array.isArray(items) ? items : [items]
+
+    // Find milk/תנובה items
+    const milkItems = arr.filter(p => {
+      const name = String(p?.ItemName || '').toLowerCase()
+      return name.includes('חלב') || name.includes('תנובה') || name.includes('milk')
+    }).slice(0, 5)
+
+    // Sample first 3 items
+    const sample = arr.slice(0, 3).map(p => ({
+      ItemCode: p?.ItemCode, ItemName: p?.ItemName, ItemPrice: p?.ItemPrice
+    }))
+
+    res.json({
+      file: pfUrl.substring(0, 80),
+      totalItems: arr.length,
+      sampleItems: sample,
+      milkItems: milkItems.map(p => ({ ItemCode: p?.ItemCode, ItemName: p?.ItemName, ItemPrice: p?.ItemPrice }))
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // ── Diagnostic: test shufersal listing page ───────────────────
 app.get('/api/debug/shufersal', async (req, res) => {
   try {
