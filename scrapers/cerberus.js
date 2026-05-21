@@ -57,9 +57,13 @@ function mergeCookies(...headerArrays) {
   return [...map.values()].join('; ')
 }
 
-/** Full 3-step auth flow → returns { cookie, csrf } */
+/** Full auth flow:
+ *  1. GET /login → csrf1 + session cookie
+ *  2. POST /login/user (follow redirects to /file/d/{chain}/) → authenticated session + csrf2
+ *  Returns { cookie, csrf } ready for DataTables API calls
+ */
 async function authenticate(chainName) {
-  // Step 1: GET login page → extract initial CSRF + session cookie
+  // Step 1: GET login page → initial CSRF + session cookie
   const loginPage = await axios.get(`${BASE}/login`, {
     httpsAgent, timeout: 12000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
@@ -68,56 +72,61 @@ async function authenticate(chainName) {
   const csrf1 = extractCsrf(loginPage.data)
   const cookie1 = mergeCookies(loginPage.headers['set-cookie'])
 
-  // Step 2: POST login with CSRF token → authenticated session
-  const loginRes = await axios.post(
+  // Step 2: POST login, redirect to /file/d/{chain}/ → authenticated file listing page
+  // Axios follows the 302 redirect automatically (maxRedirects: 5)
+  // The redirect chain updates the session to authenticated
+  // We capture cookies from EACH redirect step using a custom interceptor
+  const cookieJar = new Map()
+
+  // Seed with login page cookies
+  for (const h of (loginPage.headers['set-cookie'] || [])) {
+    const [pair] = h.split(';')
+    const eq = pair.indexOf('=')
+    if (eq > 0) cookieJar.set(pair.substring(0, eq).trim(), pair.trim())
+  }
+
+  const axiosWithRedirects = axios.create({
+    httpsAgent,
+    timeout: 15000,
+    validateStatus: (s) => s < 500,
+  })
+
+  // Capture cookies from every redirect
+  axiosWithRedirects.interceptors.response.use((response) => {
+    for (const h of (response.headers['set-cookie'] || [])) {
+      const [pair] = h.split(';')
+      const eq = pair.indexOf('=')
+      if (eq > 0) cookieJar.set(pair.substring(0, eq).trim(), pair.trim())
+    }
+    return response
+  })
+
+  const filePage = await axiosWithRedirects.post(
     `${BASE}/login/user`,
     new URLSearchParams({
       username: chainName,
       password: '',
-      r: `/file/json/dir/d/${chainName}/`,
+      r: `/file/d/${chainName}/`,
       csrftoken: csrf1,
     }).toString(),
     {
-      httpsAgent,
-      timeout: 12000,
-      maxRedirects: 0,
+      maxRedirects: 5,
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
         'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
         Cookie: cookie1,
       },
-      validateStatus: (s) => s < 500,
     }
   )
-  if (loginRes.status !== 302) {
-    throw new Error(`Login failed for ${chainName} — status ${loginRes.status} (expected 302)`)
-  }
 
-  // Merge cookies: login GET + login POST (login POST updates session to authenticated)
-  const cookie2 = mergeCookies(loginPage.headers['set-cookie'], loginRes.headers['set-cookie'])
-
-  // Step 3: GET file listing page → extract new CSRF token for API calls
-  // Also capture any new cookies set here
-  const filePage = await axios.get(`${BASE}/file/d/${chainName}/`, {
-    httpsAgent,
-    timeout: 12000,
-    headers: {
-      Cookie: cookie2,
-      'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)',
-    },
-    validateStatus: (s) => s < 500,
-  })
+  const cookieFinal = [...cookieJar.values()].join('; ')
   const csrf2 = extractCsrf(filePage.data)
+  const isLoginPage = filePage.data.includes('id="login-form"')
+
+  if (isLoginPage) throw new Error(`Auth failed for ${chainName} — still on login page after redirect`)
   if (!csrf2) throw new Error(`No CSRF token on file page for ${chainName}`)
 
-  // Final merged cookie (include any new cookies from file page)
-  const cookieFinal = mergeCookies(
-    loginPage.headers['set-cookie'],
-    loginRes.headers['set-cookie'],
-    filePage.headers['set-cookie']
-  )
-
-  console.log(`[Cerberus:${chainName}] Auth OK — cookie=${cookieFinal.substring(0,20)}...`)
+  console.log(`[Cerberus:${chainName}] Auth OK (csrf=${csrf2.substring(0,10)}...)`)
   return { cookie: cookieFinal, csrf: csrf2 }
 }
 
