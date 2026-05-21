@@ -1,14 +1,15 @@
 /**
  * Shufersal scraper — prices.shufersal.co.il
- * Covers: שופרסל שלי (001), שופרסל דיל (002), שופרסל אקספרס (003),
- *         שופרסל BE (007), יש חסד (008/018)
  *
- * File types on the listing (sorted by time desc):
- *   Pages 1–20 : Price (daily delta, few items each)
- *   Pages 20–50: PriceFull (FULL catalog per store, ~10k items each) ← we want these
- *   Pages 50–85: PromoFull, Stores
+ * Sub-chains: 001=שלי, 002=דיל, 003=אקספרס, 007=BE, 008/018=יש חסד
  *
- * Strategy: scan pages until we find one PriceFull file per sub-chain (max 60 pages).
+ * Shufersal ItemCode is their internal code, NOT always EAN-13.
+ * We try all reasonable barcode interpretations:
+ *   - As-is (works for foreign EAN-13 like 4820...)
+ *   - With leading zero (UPC-A → EAN-13: 11210000032 → 011210000032)
+ *   - With leading 00 (for 11-digit codes)
+ *
+ * We download many PriceFull files per sub-chain to maximize product coverage.
  */
 
 import axios from 'axios'
@@ -25,50 +26,64 @@ const SUBCHAIN_MAP = {
   '008': 'yesh', '018': 'yesh',
 }
 
+// How many PriceFull files to download per sub-chain
+// More = better coverage, but slower startup
+const FILES_PER_SUBCHAIN = {
+  '001': 8,   // שופרסל שלי — main format, most products
+  '002': 6,   // שופרסל דיל
+  '008': 5,   // יש חסד
+  '018': 3,   // יש חסד (alt numbering)
+  default: 2,
+}
+
 function decodeHtml(str) {
   return str.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"')
 }
 
-/** Fetch one page, return array of { url, subChain, isPriceFull } */
+/**
+ * Normalize a Shufersal ItemCode to EAN-13 candidates.
+ * Shufersal uses internal codes, but we try common transformations.
+ */
+function toBarcodeCandidates(code) {
+  const s = String(code).trim().replace(/^0+/, '') // strip leading zeros
+  const candidates = new Set()
+  candidates.add(s)                          // as-is
+  if (s.length === 12) candidates.add('0' + s)  // UPC-A → EAN-13
+  if (s.length === 11) candidates.add('00' + s) // 11-digit → 13-digit
+  if (s.length === 12) candidates.add(s)
+  if (s.length === 13) candidates.add(s)     // already EAN-13
+  return [...candidates]
+}
+
 async function fetchPage(page) {
   const res = await axios.get(`${BASE}/?page=${page}`, {
     timeout: 20000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
   })
-  const html = res.data
   const re = /href="([^"]*\.gz[^"]*)"/gi
   const files = []
   let m
-  while ((m = re.exec(html)) !== null) {
+  while ((m = re.exec(res.data)) !== null) {
     const rawHref = decodeHtml(m[1])
     const url = rawHref.startsWith('http') ? rawHref
-      : rawHref.startsWith('/') ? `${BASE}${rawHref}`
-      : `${BASE}/${rawHref}`
+      : rawHref.startsWith('/') ? `${BASE}${rawHref}` : `${BASE}/${rawHref}`
     const isPriceFull = /PriceFull/i.test(url)
-    const sc = (url.match(/PriceFull\d+-(\d{3})-/) ||
-                url.match(/Price\d+-(\d{3})-/))?.[1]
+    const sc = (url.match(/PriceFull\d+-(\d{3})-/) || url.match(/Price\d+-(\d{3})-/))?.[1]
     files.push({ url, subChain: sc || 'unknown', isPriceFull })
   }
   return files
 }
 
-/** Download + decompress + parse one PriceFull .gz → { barcode: price } */
 async function parsePriceFullFile(url, label) {
-  console.log(`[Shufersal:${label}] Downloading PriceFull...`)
   const res = await axios.get(url, {
     responseType: 'arraybuffer',
     timeout: 120000,
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; CompriceBot/1.0)' },
     maxContentLength: 100 * 1024 * 1024,
   })
-
-  const compressed = Buffer.from(res.data)
-  const xml = (await gunzip(compressed)).toString('utf8')
-  console.log(`[Shufersal:${label}] ${Math.round(compressed.length/1024)}KB → ${Math.round(xml.length/1024)}KB XML`)
-
+  const xml = (await gunzip(Buffer.from(res.data))).toString('utf8')
   const parser = new XMLParser({ parseTagValue: true, trimValues: true })
   const doc = parser.parse(xml)
-
   const root = doc?.Root || doc?.root || doc?.Prices || doc
   const raw = root?.Items?.Item || root?.Products?.Product || []
   const arr = Array.isArray(raw) ? raw : (raw ? [raw] : [])
@@ -76,47 +91,53 @@ async function parsePriceFullFile(url, label) {
   const prices = {}
   for (const p of arr) {
     if (!p) continue
-    const code = String(p?.ItemCode ?? '').trim()
+    const rawCode = String(p?.ItemCode ?? '').trim()
     const price = parseFloat(p?.ItemPrice ?? p?.Price ?? 0)
-    if (code.length >= 6 && /^\d+$/.test(code) && price > 0) {
-      prices[code] = price
+    if (!rawCode || price <= 0) continue
+
+    // Store under all barcode candidates (as-is + with leading zeros)
+    for (const candidate of toBarcodeCandidates(rawCode)) {
+      if (candidate.length >= 6 && /^\d+$/.test(candidate)) {
+        if (!(candidate in prices) || price < prices[candidate]) {
+          prices[candidate] = price
+        }
+      }
     }
   }
+
   console.log(`[Shufersal:${label}] ${arr.length} items → ${Object.keys(prices).length} barcodes`)
   return prices
 }
 
 export async function scrape() {
-  console.log('[Shufersal] Scanning pages for PriceFull files...')
+  console.log('[Shufersal] Scanning for PriceFull files...')
 
-  // Scan pages to find up to FILES_PER_SUBCHAIN PriceFull per sub-chain
-  const FILES_PER_SUBCHAIN = 3
   const found = {}  // subChain → [url, ...]
 
-  for (let page = 1; page <= 65; page++) {
-    // Stop early if we have enough files for all sub-chains
-    const allDone = Object.keys(SUBCHAIN_MAP).every(
-      sc => (found[sc] || []).length >= FILES_PER_SUBCHAIN
-    )
+  for (let page = 1; page <= 70; page++) {
+    const allDone = Object.keys(SUBCHAIN_MAP).every(sc => {
+      const limit = FILES_PER_SUBCHAIN[sc] ?? FILES_PER_SUBCHAIN.default
+      return (found[sc] || []).length >= limit
+    })
     if (allDone) break
 
     try {
       const files = await fetchPage(page)
-      let foundOnPage = 0
+      let added = 0
       for (const { url, subChain, isPriceFull } of files) {
-        if (isPriceFull && SUBCHAIN_MAP[subChain]) {
-          if (!found[subChain]) found[subChain] = []
-          if (found[subChain].length < FILES_PER_SUBCHAIN) {
-            found[subChain].push(url)
-            foundOnPage++
-          }
+        if (!isPriceFull || !SUBCHAIN_MAP[subChain]) continue
+        const limit = FILES_PER_SUBCHAIN[subChain] ?? FILES_PER_SUBCHAIN.default
+        if (!found[subChain]) found[subChain] = []
+        if (found[subChain].length < limit) {
+          found[subChain].push(url)
+          added++
         }
       }
-      if (foundOnPage > 0) {
+      if (added > 0) {
         const total = Object.values(found).reduce((s, a) => s + a.length, 0)
-        console.log(`[Shufersal] Page ${page}: +${foundOnPage} PriceFull (${total} total)`)
+        console.log(`[Shufersal] Page ${page}: +${added} files (${total} total)`)
       }
-      if (Object.values(found).some(a => a.length > 0) && foundOnPage === 0 && page > 45) break
+      if (Object.values(found).some(a => a.length > 0) && added === 0 && page > 50) break
     } catch (err) {
       console.warn(`[Shufersal] Page ${page} error: ${err.message}`)
     }
@@ -124,25 +145,34 @@ export async function scrape() {
 
   const result = { shufersal: {}, yesh: {} }
 
+  // Download all files in parallel (per sub-chain)
+  const downloads = []
   for (const [subChain, urls] of Object.entries(found)) {
     const brand = SUBCHAIN_MAP[subChain]
     if (!brand) continue
     for (const url of urls) {
-      try {
-        const prices = await parsePriceFullFile(url, subChain)
-        for (const [barcode, price] of Object.entries(prices)) {
-          if (!(barcode in result[brand]) || price < result[brand][barcode]) {
-            result[brand][barcode] = price
-          }
-        }
-      } catch (err) {
-        console.warn(`[Shufersal:${subChain}] Parse error: ${err.message}`)
+      downloads.push(
+        parsePriceFullFile(url, subChain)
+          .then(prices => ({ brand, prices }))
+          .catch(err => {
+            console.warn(`[Shufersal] Download failed: ${err.message.substring(0, 80)}`)
+            return null
+          })
+      )
+    }
+  }
+
+  const results = await Promise.all(downloads)
+  for (const item of results) {
+    if (!item) continue
+    const { brand, prices } = item
+    for (const [barcode, price] of Object.entries(prices)) {
+      if (!(barcode in result[brand]) || price < result[brand][barcode]) {
+        result[brand][barcode] = price
       }
     }
   }
 
-  const shuf = Object.keys(result.shufersal).length
-  const yesh = Object.keys(result.yesh).length
-  console.log(`[Shufersal] Done — shufersal: ${shuf}, yesh: ${yesh} barcodes`)
+  console.log(`[Shufersal] Done — shufersal: ${Object.keys(result.shufersal).length}, yesh: ${Object.keys(result.yesh).length}`)
   return result
 }
