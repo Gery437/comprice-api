@@ -205,33 +205,53 @@ app.get('/api/debug/shufersal', async (req, res) => {
   }
 })
 
-// ── Diagnostic: test Cerberus chains ─────────────────────────
+// ── Diagnostic: test Cerberus chains (new CSRF auth flow) ────
 app.get('/api/debug/cerberus', async (req, res) => {
   const https = await import('https')
   const axios = (await import('axios')).default
   const agent = new https.default.Agent({ rejectUnauthorized: false })
+  const BASE = 'https://url.publishedprices.co.il'
   const chains = ['RamiLevi', 'Yohananof', 'osherad']
   const results = {}
+
+  function extractCsrf(html) {
+    const m = html.match(/csrftoken['"]\s+content=['"]([^'"]+)['"]/)
+      || html.match(/content=['"]([^'"]+)['"]\s+name=['"]csrftoken['"]/)
+    return m ? m[1] : ''
+  }
+
   for (const chain of chains) {
     try {
-      // Step 1: login
-      const loginRes = await axios.post(
-        `https://url.publishedprices.co.il/login/user`,
-        new URLSearchParams({ username: chain, password: '' }).toString(),
-        { httpsAgent: agent, timeout: 10000, maxRedirects: 5,
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
-          validateStatus: (s) => s < 500 }
-      )
-      const cookie = (loginRes.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ')
+      // Step 1: GET login page → CSRF
+      const loginPage = await axios.get(`${BASE}/login`,
+        { httpsAgent: agent, timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+      const csrf1 = extractCsrf(loginPage.data)
+      const cookies1 = (loginPage.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ')
 
-      // Step 2: get file list
-      const listRes = await axios.get(`https://url.publishedprices.co.il/file/d/${chain}/`,
-        { httpsAgent: agent, timeout: 10000, headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' } })
-      const gzCount = (listRes.data.match(/\.gz/g) || []).length
+      // Step 2: POST login with CSRF
+      const loginRes = await axios.post(`${BASE}/login/user`,
+        new URLSearchParams({ username: chain, password: '', r: `/file/json/dir/d/${chain}/`, csrftoken: csrf1 }).toString(),
+        { httpsAgent: agent, timeout: 10000, maxRedirects: 0,
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0', Cookie: cookies1 },
+          validateStatus: s => s < 500 })
+      const cookie = [...(loginPage.headers['set-cookie'] || []), ...(loginRes.headers['set-cookie'] || [])]
+        .map(c => c.split(';')[0]).join('; ')
+      const loginOk = loginRes.status === 302
 
-      results[chain] = { ok: true, loginStatus: loginRes.status, hasCookie: !!cookie,
-        gzFiles: gzCount, listStatus: listRes.status, htmlKB: Math.round(listRes.data.length / 1024),
-        htmlSample: listRes.data.substring(0, 600) }
+      // Step 3: GET file page → new CSRF
+      const filePage = await axios.get(`${BASE}/file/d/${chain}/`,
+        { httpsAgent: agent, timeout: 10000, headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+      const csrf2 = extractCsrf(filePage.data)
+
+      // Step 4: POST JSON API for file list
+      const listRes = await axios.post(`${BASE}/file/json/dir/d/${chain}/`,
+        new URLSearchParams({ sEcho: '1', iDisplayStart: '0', iDisplayLength: '10', sSearch: 'PriceFull', csrftoken: csrf2 }).toString(),
+        { httpsAgent: agent, timeout: 10000, headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookie, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+
+      const data = listRes.data
+      const files = Array.isArray(data?.aaData) ? data.aaData.slice(0, 3).map(f => f.fname) : []
+      results[chain] = { ok: true, loginOk, csrf1: csrf1.substring(0, 10), csrf2: csrf2.substring(0, 10),
+        cookie: !!cookie, priceFullFiles: files, total: data?.iTotalRecords ?? 0, error: data?.error }
     } catch (err) {
       results[chain] = { ok: false, error: err.message.substring(0, 120) }
     }
