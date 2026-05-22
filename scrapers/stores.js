@@ -250,6 +250,29 @@ async function fetchShufersalStores() {
 }
 
 /**
+ * Nominatim reverse geocoder — given lat/lng, returns { address, city }.
+ * Rate limited to 1 req/second.
+ */
+async function reverseGeocode(lat, lng) {
+  try {
+    await new Promise(r => setTimeout(r, 1200))
+    const res = await axios.get('https://nominatim.openstreetmap.org/reverse', {
+      params: { lat, lon: lng, format: 'json', 'accept-language': 'he' },
+      timeout: 8000,
+      headers: { 'User-Agent': 'ComPrice/1.0 (doublegil@gmail.com)' },
+    })
+    const a = res.data?.address
+    if (!a) return null
+    const road = a.road || a.pedestrian || a.footway || a.street || ''
+    const num = a.house_number || ''
+    const address = [road, num].filter(Boolean).join(' ')
+    const city = a.city || a.town || a.village || a.suburb || a.municipality || ''
+    return { address, city }
+  } catch {}
+  return null
+}
+
+/**
  * Simple Nominatim geocoder — for stores that have address but no lat/lng.
  * Rate limited to 1 req/second.
  */
@@ -339,6 +362,22 @@ export async function scrapeAllStores() {
       Math.abs(u.lng - s.lng) < 0.0005
     )
     if (!dup) unique.push(s)
+  }
+
+  // ── Reverse geocode stores missing address/city ──
+  const needReverseGeocode = unique.filter(s => !s.address && !s.city)
+  if (needReverseGeocode.length > 0) {
+    console.log(`[Stores] Reverse geocoding ${needReverseGeocode.length} stores missing address (rate-limited ~1/sec)...`)
+    let done = 0
+    for (const s of needReverseGeocode) {
+      const result = await reverseGeocode(s.lat, s.lng)
+      if (result) {
+        if (result.address) s.address = result.address
+        if (result.city) s.city = result.city
+        done++
+      }
+    }
+    console.log(`[Stores] Reverse geocoded ${done}/${needReverseGeocode.length} stores`)
   }
 
   console.log(`[Stores] Final: ${unique.length} unique stores`)
