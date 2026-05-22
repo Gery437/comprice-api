@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import schedule from 'node-schedule'
 import { refreshAllPrices } from './scrapers/index.js'
-import { getByBarcode, getNameByBarcode, getCacheInfo, isCacheReady } from './cache.js'
+import { getByBarcode, getNameByBarcode, getCacheInfo, isCacheReady, getStores } from './cache.js'
 
 const app = express()
 
@@ -86,6 +86,14 @@ app.post('/api/refresh', async (req, res) => {
 // ── Cache info ────────────────────────────────────────────────
 app.get('/api/info', (req, res) => {
   res.json(getCacheInfo())
+})
+
+// ── Store locations ───────────────────────────────────────────
+// GET /api/stores
+// Response: { stores: [{id, chainKey, name, address, city, lat, lng}], count: N }
+app.get('/api/stores', (req, res) => {
+  const stores = getStores()
+  res.json({ stores, count: stores.length })
 })
 
 // ── Diagnostic: inspect PriceFull file content ───────────────

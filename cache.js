@@ -5,6 +5,7 @@
 
 let priceCache = {}
 let nameCache = {}
+let storeCache = []
 let lastUpdated = null
 let chainStats = {}
 
@@ -33,6 +34,15 @@ export function getCacheInfo() {
     lastUpdated,
     chainStats,
   }
+}
+
+export function setStores(stores) {
+  storeCache = stores
+  console.log(`[Cache] Stores: ${stores.length} store locations loaded`)
+}
+
+export function getStores() {
+  return storeCache
 }
 
 export function isCacheReady() {

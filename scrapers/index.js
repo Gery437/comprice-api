@@ -5,7 +5,8 @@
 
 import { scrape as scrapeShufersal } from './shufersal.js'
 import { scrape as scrapeCerberus } from './cerberus.js'
-import { setCache } from '../cache.js'
+import { scrapeAllStores } from './stores.js'
+import { setCache, setStores } from '../cache.js'
 
 /** Wrap a promise with a max timeout — resolves to null if time exceeded */
 function withTimeout(promise, ms, label) {
@@ -81,5 +82,12 @@ export async function refreshAllPrices() {
   console.log('==========================================\n')
 
   setCache(priceMap, chainStats, allNames)
+
+  // ── Store locations (non-blocking — runs in background) ──────
+  const MAX_STORES = 10 * 60 * 1000  // 10 minutes (Overpass + optional geocoding)
+  withTimeout(scrapeAllStores(), MAX_STORES, 'Stores')
+    .then(stores => { if (stores?.length) setStores(stores) })
+    .catch(() => {})
+
   return priceMap
 }
