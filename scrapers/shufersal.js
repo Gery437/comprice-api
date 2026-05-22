@@ -89,11 +89,14 @@ async function parsePriceFullFile(url, label) {
   const arr = Array.isArray(raw) ? raw : (raw ? [raw] : [])
 
   const prices = {}
+  const names = {}
   for (const p of arr) {
     if (!p) continue
     const rawCode = String(p?.ItemCode ?? '').trim()
     const price = parseFloat(p?.ItemPrice ?? p?.Price ?? 0)
     if (!rawCode || price <= 0) continue
+
+    const itemName = String(p?.ItemName ?? p?.ProductDescription ?? '').trim()
 
     // Store under all barcode candidates (as-is + with leading zeros)
     for (const candidate of toBarcodeCandidates(rawCode)) {
@@ -101,12 +104,15 @@ async function parsePriceFullFile(url, label) {
         if (!(candidate in prices) || price < prices[candidate]) {
           prices[candidate] = price
         }
+        if (itemName && !names[candidate]) {
+          names[candidate] = itemName
+        }
       }
     }
   }
 
   console.log(`[Shufersal:${label}] ${arr.length} items → ${Object.keys(prices).length} barcodes`)
-  return prices
+  return { prices, names }
 }
 
 export async function scrape() {
@@ -143,7 +149,7 @@ export async function scrape() {
     }
   }
 
-  const result = { shufersal: {}, yesh: {} }
+  const result = { shufersal: {}, yesh: {}, names: {} }
 
   // Download all files in parallel (per sub-chain)
   const downloads = []
@@ -153,7 +159,7 @@ export async function scrape() {
     for (const url of urls) {
       downloads.push(
         parsePriceFullFile(url, subChain)
-          .then(prices => ({ brand, prices }))
+          .then(({ prices, names }) => ({ brand, prices, names }))
           .catch(err => {
             console.warn(`[Shufersal] Download failed: ${err.message.substring(0, 80)}`)
             return null
@@ -165,14 +171,17 @@ export async function scrape() {
   const results = await Promise.all(downloads)
   for (const item of results) {
     if (!item) continue
-    const { brand, prices } = item
+    const { brand, prices, names } = item
     for (const [barcode, price] of Object.entries(prices)) {
       if (!(barcode in result[brand]) || price < result[brand][barcode]) {
         result[brand][barcode] = price
       }
     }
+    for (const [barcode, name] of Object.entries(names)) {
+      if (!result.names[barcode]) result.names[barcode] = name
+    }
   }
 
-  console.log(`[Shufersal] Done — shufersal: ${Object.keys(result.shufersal).length}, yesh: ${Object.keys(result.yesh).length}`)
+  console.log(`[Shufersal] Done — shufersal: ${Object.keys(result.shufersal).length}, yesh: ${Object.keys(result.yesh).length}, names: ${Object.keys(result.names).length}`)
   return result
 }

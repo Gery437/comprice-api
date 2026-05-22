@@ -4,14 +4,16 @@
  */
 
 let priceCache = {}
+let nameCache = {}
 let lastUpdated = null
 let chainStats = {}
 
-export function setCache(data, stats = {}) {
+export function setCache(data, stats = {}, names = {}) {
   priceCache = data
   lastUpdated = new Date().toISOString()
   chainStats = stats
-  console.log(`[Cache] Updated: ${Object.keys(priceCache).length} barcodes, chains: ${JSON.stringify(stats)}`)
+  nameCache = names
+  console.log(`[Cache] Updated: ${Object.keys(priceCache).length} barcodes, ${Object.keys(nameCache).length} names, chains: ${JSON.stringify(stats)}`)
 }
 
 export function getByBarcode(barcode) {
@@ -19,9 +21,15 @@ export function getByBarcode(barcode) {
   return priceCache[clean] || priceCache[barcode] || null
 }
 
+export function getNameByBarcode(barcode) {
+  const clean = String(barcode).replace(/\D/g, '')
+  return nameCache[clean] || nameCache[barcode] || null
+}
+
 export function getCacheInfo() {
   return {
     totalBarcodes: Object.keys(priceCache).length,
+    totalNames: Object.keys(nameCache).length,
     lastUpdated,
     chainStats,
   }

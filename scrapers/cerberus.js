@@ -185,6 +185,7 @@ async function parseGzFile(url, cookie) {
   const arr = Array.isArray(raw) ? raw : (raw ? [raw] : [])
 
   const prices = {}
+  const names = {}
   for (const p of arr) {
     if (!p) continue
     const code = String(p?.ItemCode ?? '').trim()
@@ -193,9 +194,13 @@ async function parseGzFile(url, cookie) {
       if (!(code in prices) || price < prices[code]) {
         prices[code] = price
       }
+      const itemName = String(p?.ItemName ?? p?.ProductDescription ?? '').trim()
+      if (itemName && !names[code]) {
+        names[code] = itemName
+      }
     }
   }
-  return prices
+  return { prices, names }
 }
 
 /** Scrape one chain end-to-end */
@@ -205,12 +210,13 @@ async function scrapeChain(chainName, maxFiles) {
   console.log(`[Cerberus:${chainName}] ${urls.length} PriceFull files`)
 
   const merged = {}
+  const mergedNames = {}
   const downloads = urls.map(url =>
     parseGzFile(url, cookie)
-      .then(prices => {
+      .then(({ prices, names }) => {
         const n = Object.keys(prices).length
         console.log(`[Cerberus:${chainName}] file OK — ${n} barcodes`)
-        return prices
+        return { prices, names }
       })
       .catch(err => {
         console.warn(`[Cerberus:${chainName}] file error: ${err.message.substring(0, 80)}`)
@@ -219,23 +225,28 @@ async function scrapeChain(chainName, maxFiles) {
   )
 
   const results = await Promise.all(downloads)
-  for (const prices of results) {
-    if (!prices) continue
+  for (const item of results) {
+    if (!item) continue
+    const { prices, names } = item
     for (const [b, p] of Object.entries(prices)) {
       if (!(b in merged) || p < merged[b]) merged[b] = p
     }
+    for (const [b, name] of Object.entries(names)) {
+      if (!mergedNames[b]) mergedNames[b] = name
+    }
   }
-  return merged
+  return { prices: merged, names: mergedNames }
 }
 
 export async function scrape() {
   const result = {}
+  const allNames = {}
 
   await Promise.all(
     Object.entries(CHAINS).map(async ([chainName, brandKey]) => {
       const maxFiles = FILES_PER_CHAIN[chainName] ?? 3
       try {
-        const prices = await scrapeChain(chainName, maxFiles)
+        const { prices, names } = await scrapeChain(chainName, maxFiles)
         const count = Object.keys(prices).length
         if (count > 0) {
           if (!result[brandKey]) result[brandKey] = {}
@@ -243,6 +254,9 @@ export async function scrape() {
             if (!(b in result[brandKey]) || p < result[brandKey][b]) {
               result[brandKey][b] = p
             }
+          }
+          for (const [b, name] of Object.entries(names)) {
+            if (!allNames[b]) allNames[b] = name
           }
           console.log(`[Cerberus] ✓ ${chainName} → ${count} barcodes merged into '${brandKey}'`)
         }
@@ -252,5 +266,6 @@ export async function scrape() {
     })
   )
 
+  result._names = allNames
   return result
 }

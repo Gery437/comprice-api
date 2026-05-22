@@ -37,6 +37,7 @@ export async function refreshAllPrices() {
   // Merge all chain results into one map: barcode → { chain: price }
   const priceMap = {}
   const chainStats = {}
+  const allNames = {}
 
   function mergeChain(chainKey, data) {
     if (!data || typeof data !== 'object') return
@@ -52,23 +53,33 @@ export async function refreshAllPrices() {
     }
   }
 
-  // Shufersal returns { shufersal: {...}, yesh: {...} }
-  if (shufersalResult) {
-    mergeChain('shufersal', shufersalResult.shufersal)
-    mergeChain('yesh', shufersalResult.yesh)
-  }
-
-  // Cerberus returns { ramilevi: {...}, yohananof: {...}, osher: {...}, ... }
-  if (cerberusResult) {
-    for (const [chain, data] of Object.entries(cerberusResult)) {
-      mergeChain(chain, data)
+  function mergeName(names) {
+    if (!names || typeof names !== 'object') return
+    for (const [barcode, name] of Object.entries(names)) {
+      if (!allNames[barcode]) allNames[barcode] = name
     }
   }
 
+  // Shufersal returns { shufersal: {...}, yesh: {...}, names: {...} }
+  if (shufersalResult) {
+    mergeChain('shufersal', shufersalResult.shufersal)
+    mergeChain('yesh', shufersalResult.yesh)
+    mergeName(shufersalResult.names)
+  }
+
+  // Cerberus returns { ramilevi: {...}, yohananof: {...}, osher: {...}, ..., _names: {...} }
+  if (cerberusResult) {
+    for (const [chain, data] of Object.entries(cerberusResult)) {
+      if (chain === '_names') continue
+      mergeChain(chain, data)
+    }
+    mergeName(cerberusResult._names)
+  }
+
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
-  console.log(`\n[refresh] Done in ${elapsed}s — ${Object.keys(priceMap).length} total barcodes`)
+  console.log(`\n[refresh] Done in ${elapsed}s — ${Object.keys(priceMap).length} total barcodes, ${Object.keys(allNames).length} names`)
   console.log('==========================================\n')
 
-  setCache(priceMap, chainStats)
+  setCache(priceMap, chainStats, allNames)
   return priceMap
 }

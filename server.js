@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import schedule from 'node-schedule'
 import { refreshAllPrices } from './scrapers/index.js'
-import { getByBarcode, getCacheInfo, isCacheReady } from './cache.js'
+import { getByBarcode, getNameByBarcode, getCacheInfo, isCacheReady } from './cache.js'
 
 const app = express()
 
@@ -29,12 +29,13 @@ app.get('/api/prices/:barcode', (req, res) => {
   }
 
   const prices = getByBarcode(barcode)
+  const name = getNameByBarcode(barcode)
 
   if (!prices) {
-    return res.json({ barcode, prices: {}, found: false })
+    return res.json({ barcode, prices: {}, found: false, name: name || null })
   }
 
-  res.json({ barcode, prices, found: true })
+  res.json({ barcode, prices, found: true, name: name || null })
 })
 
 // ── Batch price lookup ────────────────────────────────────────
