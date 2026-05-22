@@ -77,3 +77,7 @@ export function getStores() {
 export function isCacheReady() {
   return Object.keys(priceCache).length > 0
 }
+
+export function getCacheRaw() {
+  return { priceCache, nameCache }
+}

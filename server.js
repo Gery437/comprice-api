@@ -2,7 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import schedule from 'node-schedule'
 import { refreshAllPrices } from './scrapers/index.js'
-import { getByBarcode, getNameByBarcode, getCacheInfo, isCacheReady, getStores } from './cache.js'
+import { getByBarcode, getNameByBarcode, getCacheInfo, getCacheRaw, isCacheReady, getStores } from './cache.js'
 
 const app = express()
 
@@ -86,6 +86,20 @@ app.post('/api/refresh', async (req, res) => {
 // ── Cache info ────────────────────────────────────────────────
 app.get('/api/info', (req, res) => {
   res.json(getCacheInfo())
+})
+
+// ── Debug: sample barcodes from cache ────────────────────────
+app.get('/api/debug/sample', (req, res) => {
+  const { priceCache, nameCache } = getCacheRaw()
+  const keys = Object.keys(priceCache)
+  const prefix = req.query.prefix || ''
+  const filtered = prefix ? keys.filter(k => k.startsWith(prefix)) : keys
+  const sample = filtered.slice(0, 20).map(k => ({
+    barcode: k,
+    name: nameCache[k] || null,
+    prices: priceCache[k],
+  }))
+  res.json({ total: keys.length, filtered: filtered.length, sample })
 })
 
 // ── Store locations ───────────────────────────────────────────
