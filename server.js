@@ -128,6 +128,70 @@ app.post('/api/refresh-stores', async (req, res) => {
   }
 })
 
+// ── Debug: check actual ItemCode format in one Cerberus file ─
+app.get('/api/debug/cerberus-items', async (req, res) => {
+  try {
+    const https = (await import('https')).default
+    const axios = (await import('axios')).default
+    const zlib = await import('zlib')
+    const { promisify } = await import('util')
+    const { XMLParser } = await import('fast-xml-parser')
+    const gunzip = promisify(zlib.gunzip)
+    const BASE = 'https://url.publishedprices.co.il'
+    const agent = new https.Agent({ rejectUnauthorized: false })
+
+    function extractCsrf(html) {
+      const m = html.match(/csrftoken['"]\s+content=['"]([^'"]+)['"]/)
+        || html.match(/content=['"]([^'"]+)['"]\s+name=['"]csrftoken['"]/)
+      return m ? m[1] : ''
+    }
+
+    // Auth for RamiLevi
+    const lp = await axios.get(`${BASE}/login`, { httpsAgent: agent, timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+    const csrf1 = extractCsrf(lp.data)
+    const c1 = (lp.headers['set-cookie'] || []).map(c => c.split(';')[0]).join('; ')
+    const lr = await axios.post(`${BASE}/login/user`, new URLSearchParams({ username: 'RamiLevi', password: '', r: '/file/d/RamiLevi/', csrftoken: csrf1 }).toString(),
+      { httpsAgent: agent, timeout: 10000, maxRedirects: 0, headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: c1, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+    const cookie = [(lp.headers['set-cookie'] || []), (lr.headers['set-cookie'] || [])].flat().map(c => c.split(';')[0]).join('; ')
+    const fp = await axios.get(`${BASE}/file/d/RamiLevi/`, { httpsAgent: agent, timeout: 10000, headers: { Cookie: cookie, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+    const csrf2 = extractCsrf(fp.data)
+    const cookieFinal = [(lp.headers['set-cookie'] || []), (lr.headers['set-cookie'] || []), (fp.headers['set-cookie'] || [])].flat().map(c => c.split(';')[0]).join('; ')
+
+    const listRes = await axios.post(`${BASE}/file/json/dir/d/RamiLevi/`,
+      new URLSearchParams({ sEcho: '1', iDisplayStart: '0', iDisplayLength: '20', sSearch: 'PriceFull', iSortCol_0: '3', sSortDir_0: 'desc', csrftoken: csrf2 }).toString(),
+      { httpsAgent: agent, timeout: 10000, headers: { 'Content-Type': 'application/x-www-form-urlencoded', Cookie: cookieFinal, 'User-Agent': 'Mozilla/5.0' }, validateStatus: s => s < 500 })
+    const files = (listRes.data?.aaData || []).filter(f => f.fname && /PriceFull/i.test(f.fname))
+    if (!files.length) return res.json({ error: 'No files found' })
+
+    const url = `${BASE}/file/d/${files[0].fname}`
+    const dl = await axios.get(url, { httpsAgent: agent, responseType: 'arraybuffer', timeout: 60000, headers: { Cookie: cookieFinal, 'User-Agent': 'Mozilla/5.0' }, maxContentLength: 100 * 1024 * 1024 })
+    const xml = (await gunzip(Buffer.from(dl.data))).toString('utf8')
+    const parser = new XMLParser({ parseTagValue: true, trimValues: true })
+    const doc = parser.parse(xml)
+    const root = doc?.Root || doc?.root || doc?.Prices || doc
+    const raw = root?.Items?.Item || root?.Products?.Product || []
+    const arr = Array.isArray(raw) ? raw : (raw ? [raw] : [])
+
+    const sample = arr.slice(0, 15).map(p => ({
+      ItemCode: String(p?.ItemCode ?? ''),
+      ItemName: String(p?.ItemName ?? p?.ProductDescription ?? ''),
+      ItemPrice: p?.ItemPrice,
+      codeLen: String(p?.ItemCode ?? '').length,
+    }))
+
+    // Count by code length
+    const byLen = {}
+    for (const p of arr) {
+      const len = String(p?.ItemCode ?? '').length
+      byLen[len] = (byLen[len] || 0) + 1
+    }
+
+    res.json({ file: files[0].fname, totalItems: arr.length, codeLengths: byLen, sample })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 // ── Diagnostic: inspect PriceFull file content ───────────────
 app.get('/api/debug/pricefull', async (req, res) => {
   try {
