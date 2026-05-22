@@ -38,23 +38,42 @@ function matchChain(tags) {
 
 /**
  * Primary source: Overpass API (OpenStreetMap)
+ * Uses Israel bounding box (29.45,34.27,33.34,35.90) — faster & more reliable than area lookup.
  * Returns stores with real lat/lng already included.
  */
 async function fetchOverpassStores() {
-  const query = `[out:json][timeout:90];
-area["ISO3166-1"="IL"]->.israel;
-(
-  nwr[shop=supermarket](area.israel);
-  nwr[shop=grocery](area.israel);
-);
-out center;`
+  // Israel bounding box: south, west, north, east
+  const BBOX = '29.45,34.27,33.34,35.90'
+  const query = `[out:json][timeout:60];(nwr[shop=supermarket](${BBOX});nwr[shop=grocery](${BBOX}););out center;`
 
-  console.log('[Stores:Overpass] Querying all supermarkets in Israel...')
-  const res = await axios.post('https://overpass-api.de/api/interpreter', query, {
-    headers: { 'Content-Type': 'text/plain' },
-    timeout: 120000,
-  })
+  console.log('[Stores:Overpass] Querying all supermarkets in Israel (bbox)...')
 
+  // Try multiple Overpass mirrors
+  const mirrors = [
+    'https://overpass-api.de/api/interpreter',
+    'https://lz4.overpass-api.de/api/interpreter',
+    'https://z.overpass-api.de/api/interpreter',
+  ]
+
+  let res = null
+  for (const mirror of mirrors) {
+    try {
+      res = await axios.post(mirror, query, {
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'User-Agent': 'ComPrice/1.0 (doublegil@gmail.com)',
+          'Accept': 'application/json',
+        },
+        timeout: 90000,
+      })
+      if (res.status === 200) break
+    } catch (err) {
+      console.warn(`[Stores:Overpass] mirror ${mirror} failed: ${err.message}`)
+      res = null
+    }
+  }
+
+  if (!res) throw new Error('All Overpass mirrors failed')
   const elements = res.data?.elements || []
   const stores = []
 

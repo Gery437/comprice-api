@@ -90,10 +90,28 @@ app.get('/api/info', (req, res) => {
 
 // ── Store locations ───────────────────────────────────────────
 // GET /api/stores
-// Response: { stores: [{id, chainKey, name, address, city, lat, lng}], count: N }
+// Response: { stores: [{id, chainKey, name, address, city, lat, lng}], count: N, ready: bool }
 app.get('/api/stores', (req, res) => {
   const stores = getStores()
-  res.json({ stores, count: stores.length })
+  res.json({ stores, count: stores.length, ready: stores.length > 0 })
+})
+
+// POST /api/refresh-stores  — trigger store scraping manually
+let storesRefreshing = false
+app.post('/api/refresh-stores', async (req, res) => {
+  if (storesRefreshing) return res.json({ status: 'already_running' })
+  storesRefreshing = true
+  res.json({ status: 'started' })
+  try {
+    const { scrapeAllStores } = await import('./scrapers/stores.js')
+    const stores = await scrapeAllStores()
+    if (stores?.length) setStores(stores)
+    console.log(`[refresh-stores] Done: ${stores?.length ?? 0} stores`)
+  } catch (err) {
+    console.error('[refresh-stores] Error:', err.message)
+  } finally {
+    storesRefreshing = false
+  }
 })
 
 // ── Diagnostic: inspect PriceFull file content ───────────────
