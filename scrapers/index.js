@@ -26,6 +26,12 @@ export async function refreshAllPrices() {
   console.log('\n========== Starting price refresh ==========')
   const startTime = Date.now()
 
+  // ── Store locations — start immediately in background, don't wait for prices ──
+  const MAX_STORES = 10 * 60 * 1000  // 10 minutes (Overpass + reverse geocoding)
+  withTimeout(scrapeAllStores(), MAX_STORES, 'Stores')
+    .then(stores => { if (stores?.length) setStores(stores) })
+    .catch(() => {})
+
   // Run all scrapers in parallel, each with a max timeout
   const MAX_SHUFERSAL = 8 * 60 * 1000  // 8 minutes
   const MAX_CERBERUS  = 5 * 60 * 1000  // 5 minutes (3-step auth + parallel file downloads)
@@ -82,12 +88,6 @@ export async function refreshAllPrices() {
   console.log('==========================================\n')
 
   setCache(priceMap, chainStats, allNames)
-
-  // ── Store locations (non-blocking — runs in background) ──────
-  const MAX_STORES = 10 * 60 * 1000  // 10 minutes (Overpass + optional geocoding)
-  withTimeout(scrapeAllStores(), MAX_STORES, 'Stores')
-    .then(stores => { if (stores?.length) setStores(stores) })
-    .catch(() => {})
 
   return priceMap
 }
