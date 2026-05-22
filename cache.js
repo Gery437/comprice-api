@@ -17,14 +17,43 @@ export function setCache(data, stats = {}, names = {}) {
   console.log(`[Cache] Updated: ${Object.keys(priceCache).length} barcodes, ${Object.keys(nameCache).length} names, chains: ${JSON.stringify(stats)}`)
 }
 
-export function getByBarcode(barcode) {
+/**
+ * Generate lookup candidates for a barcode.
+ * Israeli EAN-13 (729...) products are stored in government XML
+ * under internal codes that are often just the suffix of the EAN-13.
+ * e.g. "7290002040891" → try also "2040891", "02040891", "002040891"
+ */
+function barcodeCandidates(barcode) {
   const clean = String(barcode).replace(/\D/g, '')
-  return priceCache[clean] || priceCache[barcode] || null
+  const candidates = [clean]
+
+  if (clean.length === 13 && clean.startsWith('729')) {
+    // Strip 729 prefix → 10 digits
+    candidates.push(clean.slice(3))
+    // Strip leading zeros from that
+    const stripped = clean.slice(3).replace(/^0+/, '')
+    if (stripped) candidates.push(stripped)
+    // Also try last 8 and last 7 digits directly
+    candidates.push(clean.slice(-8))
+    candidates.push(clean.slice(-7))
+  }
+
+  // Deduplicate while preserving order
+  return [...new Set(candidates)]
+}
+
+export function getByBarcode(barcode) {
+  for (const c of barcodeCandidates(barcode)) {
+    if (priceCache[c]) return priceCache[c]
+  }
+  return null
 }
 
 export function getNameByBarcode(barcode) {
-  const clean = String(barcode).replace(/\D/g, '')
-  return nameCache[clean] || nameCache[barcode] || null
+  for (const c of barcodeCandidates(barcode)) {
+    if (nameCache[c]) return nameCache[c]
+  }
+  return null
 }
 
 export function getCacheInfo() {

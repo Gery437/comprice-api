@@ -41,17 +41,26 @@ function decodeHtml(str) {
 }
 
 /**
- * Normalize a Shufersal ItemCode to EAN-13 candidates.
- * Shufersal uses internal codes, but we try common transformations.
+ * Normalize a Shufersal ItemCode to barcode candidates.
+ * Shufersal internal codes differ from EAN-13 — we generate multiple variants:
+ *   - As-is (stripped of leading zeros)
+ *   - UPC-A → EAN-13 (12-digit: add leading 0)
+ *   - 11-digit → 13-digit (add "00" prefix)
+ *   - Israeli EAN-13 reconstruction: 729000 + right-pad to 13 digits
  */
 function toBarcodeCandidates(code) {
-  const s = String(code).trim().replace(/^0+/, '') // strip leading zeros
+  const raw = String(code).trim()
+  const s = raw.replace(/^0+/, '') // strip leading zeros
   const candidates = new Set()
-  candidates.add(s)                          // as-is
-  if (s.length === 12) candidates.add('0' + s)  // UPC-A → EAN-13
-  if (s.length === 11) candidates.add('00' + s) // 11-digit → 13-digit
-  if (s.length === 12) candidates.add(s)
-  if (s.length === 13) candidates.add(s)     // already EAN-13
+  candidates.add(raw)              // original (with leading zeros if any)
+  candidates.add(s)                // stripped
+  if (s.length === 12) candidates.add('0' + s)   // UPC-A → EAN-13
+  if (s.length === 11) candidates.add('00' + s)  // 11-digit → 13-digit
+  // Israeli EAN-13: 729 + zero-pad + code = 13 digits
+  if (s.length <= 10) {
+    const ean = '729' + s.padStart(10, '0')
+    candidates.add(ean)
+  }
   return [...candidates]
 }
 
