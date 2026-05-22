@@ -17,12 +17,13 @@ const BASE_CERBERUS = 'https://url.publishedprices.co.il'
 const BASE_SHUFERSAL = 'http://prices.shufersal.co.il'
 
 // Chain pattern matchers (name, brand, or operator tags)
+// NOTE: "יש בשכונה" and "יש חסד" are both Shufersal sub-brands
 const CHAIN_MATCHERS = [
-  { key: 'shufersal', pattern: /שופרסל|shufersal/i },
+  { key: 'shufersal', pattern: /שופרסל|shufersal|יש בשכונה|yesh.?bash?k?una/i },
+  { key: 'yesh',      pattern: /יש חסד|yesh.?h[ae]sed/i },
   { key: 'ramilevi',  pattern: /רמי לוי|rami.?levy/i },
   { key: 'yohananof', pattern: /יוחננוף|yohananof/i },
   { key: 'osher',     pattern: /אושר עד|osher.?ad|חצי חינם|hazi.?hinam/i },
-  { key: 'yesh',      pattern: /יש חסד|yesh.?h[ae]sed/i },
   { key: 'mega',      pattern: /מגה בול|mega.?bool|mega/i },
   { key: 'victory',   pattern: /ויקטורי|victory/i },
   { key: 'yeinot',    pattern: /יינות ביתן|yeinot.?bitan/i },
